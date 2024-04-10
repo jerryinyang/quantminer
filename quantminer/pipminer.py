@@ -134,6 +134,28 @@ class Miner:
         print("Avg Return : ", qt.stats.avg_return(ser))
 
 
+    def transform(self, data:Union[List, np.ndarray]):
+        """
+        Generate labels for a full dataset.
+        """
+        # Preprocess Data
+        data = self._preprocess_data(data, test_mode=True)
+
+        # Generate data windows
+        windows = self._generate_training_set(data)
+
+        # Transform the Data
+        _pivots, _unique_indices = self._transform_data(windows)
+
+        # Generate the cluster labels
+        _l = self._agent_cluster.predict(_pivots)
+        indices = _unique_indices + self.n_lookback - 1
+        _labels = self._assign_cluster_labels(data, _l, indices)
+
+        return _labels
+        
+
+
     def generate_signal(self, data: List[np.ndarray]):
         """
         This generates signal for one data window.
@@ -593,15 +615,14 @@ if __name__ == "__main__":
     test_data = test_data["close"].dropna(axis=0)
     test_data = test_data.to_numpy()
 
-    miner = Miner(25, 5)
-    miner.fit(train_data)
+    # miner = Miner(25, 5)
+    # miner.fit(train_data)
 
-    miner.save_model(parent_path / 'pipminer.pkl')
+    # miner.save_model(parent_path / 'pipminer.pkl')
 
-    miner = Miner.load_model(parent_path / 'pipminer.pkl')
+    miner : Miner = Miner.load_model(parent_path / 'pipminer.pkl')
 
-    with open(parent_path / 'pipminer.pkl', 'rb') as file:
-        miner = pickle.load(file)
+    print(miner.transform(test_data))
 
-    miner.test(test_data)
+    # miner.test(test_data)
     print('Successful')
