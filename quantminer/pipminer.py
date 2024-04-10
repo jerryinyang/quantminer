@@ -32,11 +32,11 @@ class Miner:
 
         # Store Training Data
         self._data: List = []
-        self._data_train_X: List[np.ndarray] = []
-        self._data_train_y: List[np.ndarray] = []
+        self._data_train_X: Union[List, np.ndarray] = []
+        self._data_train_y: Union[List, np.ndarray] = []
 
         # Store Clusters Assignments
-        self._unique_pip_indices : np.ndarray = []
+        self._unique_pip_indices : Union[List, np.ndarray]= []
         self._cluster_labels = []
 
         # Store Selected Cluster Labels
