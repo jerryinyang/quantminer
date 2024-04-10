@@ -1,0 +1,1 @@
+from .pipminer import Miner # noqa

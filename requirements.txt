@@ -1,0 +1,13 @@
+kneed
+quantstats
+pandas
+numpy
+scikit-learn
+sktime
+dtaidistance
+matplotlib
+tslearn 
+plotly
+ipython
+pyarrow
+fastparquet
