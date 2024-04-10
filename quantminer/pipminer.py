@@ -22,11 +22,13 @@ class Miner:
     def __init__(self, 
                  n_lookback: int, 
                  n_pivots: int, 
-                 hold_period: int = 6, 
+                 n_clusters: int = 8,
+                 hold_period: int = 6,
                  model_type:Literal['standard', 'ts', 'sequential']='standard') -> None:
         self.n_lookback = n_lookback
         self.n_pivots = n_pivots
         self.hold_period = hold_period
+        self.n_cluster = n_clusters
 
         self._model_type = model_type
 
@@ -50,7 +52,7 @@ class Miner:
         self._agent_cluster = None
 
         # Preset attributes
-        self._n_cluster = 8
+        
         self._random_state = 0
 
 
@@ -154,7 +156,6 @@ class Miner:
 
         return _labels
         
-
 
     def generate_signal(self, data: List[np.ndarray]):
         """
@@ -335,11 +336,11 @@ class Miner:
         Cluster the training data. Default n_clusters
         """
         
-        # self._n_cluster = self.__find_n_clusters()
+        # self.n_cluster = self.__find_n_clusters()
         
         # SKTime (TSLearn) Kmeans
         if self._model_type == 'ts':
-            self._agent_cluster = TimeSeriesKMeansTslearn(n_clusters=self._n_cluster,
+            self._agent_cluster = TimeSeriesKMeansTslearn(n_clusters=self.n_cluster,
                                     metric='euclidean',
                                     n_jobs=-1,
                                     random_state=self._random_state,
@@ -347,14 +348,14 @@ class Miner:
 
         elif self._model_type == 'standard':
             self._agent_cluster = KMeans(
-                n_clusters=self._n_cluster,
+                n_clusters=self.n_cluster,
                 n_init="auto",
                 random_state=self._random_state,
                 )
 
         elif self._model_type == "sequential":
             self._agent_cluster = SeqKMeans(
-                n_clusters=self._n_cluster, 
+                n_clusters=self.n_cluster, 
                 learning_rate=0.5, 
                 centroid_update_threshold_std=3, 
                 verbose=False,
@@ -422,7 +423,7 @@ class Miner:
         _labels = self._cluster_labels
 
         # Iterate through each cluster label
-        for _label in range(self._n_cluster):
+        for _label in range(self.n_cluster):
             # Create a mask for the label in the labels; everything else should be zero
             mask_label: np.ndarray = _labels == _label
 
