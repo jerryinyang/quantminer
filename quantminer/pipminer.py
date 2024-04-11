@@ -24,7 +24,8 @@ class Miner:
                  n_pivots: int, 
                  n_clusters: int = 8,
                  hold_period: int = 6,
-                 model_type:Literal['standard', 'ts', 'sequential']='standard') -> None:
+                 model_type:Literal['standard', 'ts', 'sequential']='standard',
+                 verbose = False) -> None:
         self.n_lookback = n_lookback
         self.n_pivots = n_pivots
         self.hold_period = hold_period
@@ -52,7 +53,7 @@ class Miner:
         self._agent_cluster = None
 
         # Preset attributes
-        
+        self._verbose = verbose
         self._random_state = 0
 
 
@@ -83,7 +84,7 @@ class Miner:
         # Test the performance of the selected clusters
         martins = self._compute_performance()
 
-        print("Training Complete : ", martins)
+        self.verbose_output("Training Complete : ", martins)
 
         # Clean up stored data
         self._cleanup()
@@ -124,7 +125,7 @@ class Miner:
 
         martin_score = self.__compute_martin(_returns)
 
-        print("Test Martin Score : ", martin_score)
+        self.verbose_output("Test Martin Score : ", martin_score)
 
         if plot_equity:
             plt.plot(np.cumsum(_returns))
@@ -132,12 +133,12 @@ class Miner:
 
         ser = pd.Series(_returns)
 
-        print("Profit Factor : ", qt.stats.profit_factor(ser))
-        print("Risk of Ruin : ", qt.stats.risk_of_ruin(ser))
-        print("Sharpe : ", qt.stats.sharpe(ser))
-        print("Avg Win : ", qt.stats.avg_win(ser))
-        print("Avg Loss : ", qt.stats.avg_loss(ser))
-        print("Avg Return : ", qt.stats.avg_return(ser))
+        self.verbose_output("Profit Factor : ", qt.stats.profit_factor(ser))
+        self.verbose_output("Risk of Ruin : ", qt.stats.risk_of_ruin(ser))
+        self.verbose_output("Sharpe : ", qt.stats.sharpe(ser))
+        self.verbose_output("Avg Win : ", qt.stats.avg_win(ser))
+        self.verbose_output("Avg Loss : ", qt.stats.avg_loss(ser))
+        self.verbose_output("Avg Return : ", qt.stats.avg_return(ser))
 
         return martin_score
 
@@ -201,7 +202,7 @@ class Miner:
         with open(path, 'wb') as f:
             try:
                 pickle.dump(self, f)
-                print(f'Model saved at {path}')
+                self.verbose_output(f'Model saved at {path}')
             except Exception as e:
                 raise e
     
@@ -218,7 +219,7 @@ class Miner:
         with open(path, 'rb') as f:
             try:
                 miner = pickle.load(f)
-                print(f'Model Loaded from : {path}')
+                print(f'OUTPUT : Model Loaded from : {path}')
             except Exception as e:
                 raise e
         
@@ -318,7 +319,7 @@ class Miner:
                 windows.append(data[start_index:end_index])
 
             except Exception as e:
-                print("Error Occured : \n", e)
+                self.verbose_output("Error Occured : \n", e)
                 continue
 
         # During tests, return the generated data windows
@@ -416,11 +417,11 @@ class Miner:
                 random_state=self._random_state,
                 )
 
-        print("Clustering data...")
+        self.verbose_output("Clustering data...")
 
         self._agent_cluster.fit(self._data_train_X)
 
-        print("Clustering complete")
+        self.verbose_output("Clustering complete")
 
 
     def _assign_cluster_labels(
@@ -630,7 +631,7 @@ class Miner:
         )
         optimal_n = kneedle.knee
 
-        print("Optimal N: ", optimal_n)
+        self.verbose_output("Optimal N: ", optimal_n)
 
         return optimal_n
 
@@ -672,6 +673,14 @@ class Miner:
 
         # Show the plot
         fig.show()
+
+
+    def verbose_output(self, *args):
+        if not self._verbose:
+            return
+        
+        for _ in args:
+            print(args)
 
 
 if __name__ == "__main__":
