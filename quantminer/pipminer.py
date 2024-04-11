@@ -183,8 +183,7 @@ class Miner:
         return signal, list(np.squeeze(_pivots))
 
 
-    @staticmethod
-    def save_model(path:Union[Path, str]):
+    def save_model(self, path:Union[Path, str]):
         # Convert path to Path object, and check if it exists
         if not isinstance(path, Path):
             path = Path(str)
@@ -195,7 +194,7 @@ class Miner:
         # Save model
         with open(path, 'wb') as f:
             try:
-                pickle.dump(miner, f)
+                pickle.dump(self, f)
                 print(f'Model saved at {path}')
             except Exception as e:
                 raise e

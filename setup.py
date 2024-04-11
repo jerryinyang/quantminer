@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name='quantminer',
-    version='0.3.1', 
+    version='0.3.2', 
     description='Data/Pattern Mining Algorithms for Financial Data',
     author='Jerry Inyang',
     author_email='jerprog0@gmail.com',
