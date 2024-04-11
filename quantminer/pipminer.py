@@ -88,6 +88,8 @@ class Miner:
         # Clean up stored data
         self._cleanup()
 
+        return martins
+
 
     def test(self, data: List[np.ndarray], plot_equity=False):
         # Preprocess Data
@@ -120,7 +122,9 @@ class Miner:
         # Get the returns, compute martin score
         _returns = _signals * _returns
 
-        print("Test Martin Score : ", self.__compute_martin(_returns))
+        martin_score = self.__compute_martin(_returns)
+
+        print("Test Martin Score : ", martin_score)
 
         if plot_equity:
             plt.plot(np.cumsum(_returns))
@@ -134,6 +138,8 @@ class Miner:
         print("Avg Win : ", qt.stats.avg_win(ser))
         print("Avg Loss : ", qt.stats.avg_loss(ser))
         print("Avg Return : ", qt.stats.avg_return(ser))
+
+        return martin_score
 
 
     def transform(self, data:Union[List, np.ndarray]):
@@ -571,6 +577,8 @@ class Miner:
 
 
     def __compute_martin(self, rets: np.array):
+    
+        return qt.stats.ulcer_performance_index(pd.Series(rets))
     
         rsum = np.sum(rets)
         short = False
