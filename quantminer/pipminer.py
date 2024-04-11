@@ -2,7 +2,7 @@ import pickle  # noqa
 import warnings
 
 from pathlib import Path
-from typing import List, Literal, Union
+from typing import List, Literal, Optional, Union
 
 import matplotlib.pyplot as plt 
 import numpy as np
@@ -217,6 +217,54 @@ class Miner:
                 raise e
         
         return miner 
+
+
+    def apply_holding_period(self, labels, hold_period:Optional[int]=-1, selected_labels:Optional[List]=None):
+        """
+        Applies a holding period to selected cluster labels, ensuring that consecutive occurrences of the same label are separated by the specified time.
+
+        Args:
+            labels (numpy.ndarray): An array of cluster labels representing the labeling sequence.
+            hold_period (int, optional): The minimum number of time steps required between consecutive 
+                                        occurrences of the same label. If -1, uses the value stored in  
+                                        `self.hold_period`. Defaults to -1.
+            selected_labels (List, optional):  A list of specific cluster labels to apply the holding 
+                                            period to. If None, applies to all cluster labels. 
+                                            Defaults to None.
+
+        Returns:
+            numpy.ndarray: A new array of labels with the holding period applied. Unmodified labels are
+                        assigned a value of -1.
+        """
+        n_clusters = self.n_cluster
+
+        # If no holding period is passed, use self.hold_period
+        if hold_period <= 0:
+            hold_period = self.hold_period
+
+        # If no specific labels are passed, apply the holding period to all cluster labels
+        if (selected_labels is None) or (len(selected_labels) == 0):
+            selected_labels = list(range(n_clusters))
+
+        labels = np.array(labels)
+
+        valid_indices = np.where(np.isin(labels, selected_labels))[0]
+        new_labels = np.ones_like(labels) * -1
+
+        prev_index = -hold_period - 1
+        for index in valid_indices:
+            label = labels[index]
+            
+            # Ensure no overlapping labels
+            if (index > prev_index + hold_period):
+                prev_index = index
+
+                start_index = index + 1
+                end_index = min(index + hold_period + 1, len(labels))
+
+                new_labels[start_index:end_index] = label
+
+        return new_labels
 
 
     def _preprocess_data(self, data, **kwargs):
@@ -485,16 +533,41 @@ class Miner:
 
 
     def __apply_holding_period(self, signals):
-        """Apply holding period logic to signals."""
-        prev = 0
+        """
+        Applies a holding period to a set of trading signals, enforcing a delay between 
+        consecutive non-zero signals.
 
-        for index, signal in enumerate(signals):
-            if (signal != 0) and (index > (prev + self.hold_period)):
-                prev = index
+        This function is likely used in trading strategies to prevent overly frequent 
+        trades, potentially reducing transaction costs and mitigating the effects of 
+        temporary market noise.
+
+        Args:
+            signals (numpy.ndarray): An array containing trading signals (e.g., buy/sell). 
+
+        Returns:
+            numpy.ndarray: An array of signals with the holding period applied. 
+                        Non-zero signals will be followed by a specified number of
+                        zero signals.  
+        """
+        
+        signals = np.array(signals)
+
+        nonzero = np.where(signals != 0)[0]
+        new_signals = np.zeros_like(signals)
+
+        prev_index = -self.hold_period - 1
+        for index in nonzero:
+            signal = signals[index]
+            
+            if (index > prev_index + self.hold_period):
+                prev_index = index
+
+                start_index = index + 1
                 end_index = min(index + self.hold_period + 1, len(signals))
-                signals[index + 1 : end_index] = signal
-                signals[index] = 0
-        return signals
+
+                new_signals[start_index:end_index] = signal
+
+        return new_signals
 
 
     def __compute_martin(self, rets: np.array):
@@ -622,7 +695,7 @@ if __name__ == "__main__":
 
     miner : Miner = Miner.load_model(parent_path / 'pipminer.pkl')
 
-    print(miner.transform(test_data))
+    # print(miner.transform(test_data))
 
-    # miner.test(test_data)
+    miner.test(test_data)
     print('Successful')
