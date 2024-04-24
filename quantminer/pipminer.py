@@ -1,6 +1,7 @@
 import pickle  # noqa
 import warnings
 
+from copy import copy
 from pathlib import Path
 from typing import List, Literal, Optional, Union
 
@@ -13,7 +14,7 @@ from sklearn.cluster import Birch, KMeans
 from sklearn.metrics import silhouette_score
 from sktime.clustering.k_means import TimeSeriesKMeansTslearn 
 
-from .classes import PIP, SeqKMeans
+from .classes import ReducerFFT, ReducerFFTWavelet, ReducerPIP, ReducerWavelet, SeqKMeans
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -25,7 +26,11 @@ class Miner:
                  n_clusters: int = 8,
                  hold_period: int = 6,
                  model_type:Literal['standard', 'ts', 'sequential']='standard',
-                 verbose = False) -> None:
+                 reducer:Literal['FFT', 'PIP', 'Wavelet', 'FFTWavelet']='PIP',
+                 verbose = False,
+                 wavelet:Literal['db1', 'db2', 'db3', 'db4', 'coif1', 'haar', 'sym5', 'bior3.5']='coif2',
+                 ) -> None:
+            
         self.n_lookback = n_lookback
         self.n_pivots = n_pivots
         self.hold_period = hold_period
@@ -35,6 +40,7 @@ class Miner:
 
         # Store Training Data
         self._data: List = []
+        self._price_data = []
         self._data_train_X: Union[List, np.ndarray] = []
         self._data_train_y: Union[List, np.ndarray] = []
 
@@ -47,7 +53,7 @@ class Miner:
         self._cluster_labels_short = []
 
         # Store the dimensionality reduction agent
-        self._agent_reduce: PIP = None
+        self._agent_reduce: ReducerPIP = self.__init_reducer(reducer, wavelet=wavelet)
 
         # Store the clustering agent
         self._agent_cluster = None
@@ -57,7 +63,18 @@ class Miner:
         self._random_state = 0
 
 
-    def fit(self, data: np.ndarray):
+    def fit(self, data: np.ndarray, price_data: np.ndarray=None):
+        
+        # Save raw price data for returns computation
+        if price_data is None:
+            price_data = copy(data)
+            
+        if len(price_data) != len(data):
+            raise ValueError(f"Length mismatch: `price_data` is {len(price_data)}, `data` is {len(data)}")
+        
+        # Assign self._price_data
+        self._price_data = self._preprocess_data(price_data, test_mode=True)
+        
         # Set the random state
         np.random.seed(self._random_state)
 
@@ -89,13 +106,22 @@ class Miner:
         # Clean up stored data
         self._cleanup()
 
-        return martins
+        print(martins)
 
 
-    def test(self, data: List[np.ndarray], plot_equity=False):
+    def test(self, data:np.ndarray, price_data:np.ndarray=None, plot_equity=False):
+        # Save raw price data for returns computation
+        if price_data is None:
+            price_data = copy(data)
+
+        if len(price_data) != len(data):
+            raise ValueError(f"Length mismatch: `price_data` is {len(price_data)}, `data` is {len(data)}")
+
         # Preprocess Data
         data = self._preprocess_data(data, test_mode=True)
-        _returns = np.diff(data, prepend=data[0])
+        price_data = self._preprocess_data(price_data, test_mode=True)
+
+        _returns = np.diff(price_data, prepend=data[0])
 
         # Generate data windows
         windows = self._generate_training_set(data)
@@ -193,7 +219,7 @@ class Miner:
     def save_model(self, path:Union[Path, str]):
         # Convert path to Path object, and check if it exists
         if not isinstance(path, Path):
-            path = Path(str)
+            path = Path(path)
             
             if not path.exists():
                 raise FileNotFoundError(f"File not found: {path}")
@@ -203,8 +229,8 @@ class Miner:
             try:
                 pickle.dump(self, f)
                 self.verbose_output(f'Model saved at {path}')
-            except Exception as e:
-                raise e
+            except Exception:
+                raise
     
     @staticmethod
     def load_model(path:Union[Path, str]):
@@ -220,8 +246,8 @@ class Miner:
             try:
                 miner = pickle.load(f)
                 print(f'OUTPUT : Model Loaded from : {path}')
-            except Exception as e:
-                raise e
+            except Exception:
+                raise
         
         return miner 
 
@@ -281,9 +307,11 @@ class Miner:
         """
 
         if kwargs.get("test_mode", False):
-            return np.log(data)
+            # return np.sign(data) * np.log1p(np.abs(data))
+            return np.arcsinh(data)
 
-        self._data = np.log(data)
+        # self._data = np.sign(data) * np.log1p(np.abs(data))
+        self._data = np.arcsinh(data)
 
 
     def _generate_training_set(self, data: np.ndarray = None):
@@ -350,11 +378,7 @@ class Miner:
 
         # Dimensionality Reduction
         if (self._agent_reduce is None):
-            if not test_mode:
-                self._agent_reduce = PIP(n_pivots=self.n_pivots, dist_measure=1)
-            
-            else:
-                raise ValueError("Model has not been training. self._agent_reduce is missing.")
+            raise ValueError("Model has not been training. self._agent_reduce has not been initialized.")
 
         pivots = self._agent_reduce.transform(data)
 
@@ -471,13 +495,14 @@ class Miner:
         cluster_scores = []
 
         # Compute the returns
-        _returns = np.diff(self._data, prepend=self._data[0])
+        _returns = np.diff(self._price_data, prepend=self._price_data[0])
 
         # Get the cluster labels
         _labels = self._cluster_labels
 
         # Iterate through each cluster label
         for _label in range(self.n_cluster):
+
             # Create a mask for the label in the labels; everything else should be zero
             mask_label: np.ndarray = _labels == _label
 
@@ -501,7 +526,7 @@ class Miner:
         Test the performance of the selected clusters
         """
 
-        _returns = np.diff(self._data, prepend=self._data[0])
+        _returns = np.diff(self._price_data, prepend=self._price_data[0])
 
         # Get the full labels
         _labels = self._cluster_labels
@@ -531,6 +556,7 @@ class Miner:
 
         # Clear Training Data
         self._data = []
+        self._price_data = []
         self._data_train_X = []
         self._data_train_y = []
 
@@ -581,22 +607,22 @@ class Miner:
     
         return qt.stats.ulcer_performance_index(pd.Series(rets))
     
-        rsum = np.sum(rets)
-        short = False
-        if rsum < 0.0:
-            rets *= -1
-            rsum *= -1
-            short = True
+        # rsum = np.sum(rets)
+        # short = False
+        # if rsum < 0.0:
+        #     rets *= -1
+        #     rsum *= -1
+        #     short = True
 
-        csum = np.cumsum(rets)
-        eq = pd.Series(np.exp(csum))
-        sumsq = np.sum(((eq / eq.cummax()) - 1) ** 2.0)
-        ulcer_index = (sumsq / len(rets)) ** 0.5
-        martin = rsum / (ulcer_index + 1.0e-10)
-        if short:
-            martin = -martin
+        # csum = np.cumsum(rets)
+        # eq = pd.Series(np.exp(csum))
+        # sumsq = np.sum(((eq / eq.cummax()) - 1) ** 2.0)
+        # ulcer_index = (sumsq / len(rets)) ** 0.5
+        # martin = rsum / (ulcer_index + 1.0e-10)
+        # if short:
+        #     martin = -martin
 
-        return martin
+        # return martin
 
 
     def __find_n_clusters(self):
@@ -675,12 +701,28 @@ class Miner:
         fig.show()
 
 
+    def __init_reducer(self, reducer:str, wavelet:str):
+
+        if reducer == 'FFT':
+            return ReducerFFT(n_components=self.n_pivots)
+            
+        elif reducer == 'Wavelet':
+            return ReducerWavelet(n_coefficients=self.n_pivots,
+                                  wavelet=wavelet)
+        
+        elif reducer == 'FFTWavelet':
+            return ReducerFFTWavelet(n_components=self.n_pivots)
+
+        else:
+            return ReducerPIP(n_pivots=self.n_pivots, dist_measure=1)
+
+
     def verbose_output(self, *args):
         if not self._verbose:
             return
         
         for _ in args:
-            print(args)
+            print(_)
 
 
 if __name__ == "__main__":
@@ -689,14 +731,14 @@ if __name__ == "__main__":
     
     # Define your date range
     start_date = "2017-12-01"
-    end_date = "2022-12-31"
+    end_date = "2021-12-31"
 
     raw_data = pd.read_parquet(btc_path)
 
     # Filter the DataFrame
     train_data = raw_data[(raw_data.index >= start_date) & (raw_data.index <= end_date)]
     test_data = raw_data[
-        (raw_data.index >= "2023-01-01") & (raw_data.index <= "2023-12-31")
+        (raw_data.index >= "2022-01-01") & (raw_data.index <= "2023-12-31")
     ]
 
     train_data = train_data["close"].dropna(axis=0)
@@ -705,14 +747,21 @@ if __name__ == "__main__":
     test_data = test_data["close"].dropna(axis=0)
     test_data = test_data.to_numpy()
 
-    # miner = Miner(25, 5)
+
+    miner = Miner(25, 10, reducer="Wavelet", wavelet='haar')
+
+    # print('Successful')
+    # miner.fit(np.diff(train_data, prepend=train_data[0]-1), train_data)
+    # print(miner.test(np.diff(test_data, prepend=test_data[0]-1), test_data))
+
     # miner.fit(train_data)
+    miner.fit(np.diff(train_data, prepend=train_data[0]-1), train_data)
 
     # miner.save_model(parent_path / 'pipminer.pkl')
 
-    miner : Miner = Miner.load_model(parent_path / 'pipminer.pkl')
+    # miner : Miner = Miner.load_model(parent_path / 'pipminer.pkl')
 
     # print(miner.transform(test_data))
 
-    miner.test(test_data)
-    print('Successful')
+    # print(miner.test(test_data))
+    print(miner.test(np.diff(test_data, prepend=test_data[0]-1), test_data))
