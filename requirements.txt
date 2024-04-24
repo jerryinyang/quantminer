@@ -81,7 +81,6 @@ python-dateutil==2.9.0.post0
 pytz==2024.1
 PyWavelets==1.6.0
 pyzmq==25.1.2
-quantminer==0.1.0
 QuantStats==0.0.62
 readme_renderer==43.0
 requests==2.31.0

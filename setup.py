@@ -8,7 +8,7 @@ def read_requirements():
 
 setup(
     name='quantminer',
-    version='0.5.0',
+    version='0.5.1',
     description='Data/Pattern Mining Algorithms for Financial Data',
     author='Jerry Inyang',
     author_email='jerprog0@gmail.com',
