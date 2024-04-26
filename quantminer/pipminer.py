@@ -29,6 +29,7 @@ class Miner:
                  reducer:Literal['FFT', 'PIP', 'Wavelet', 'FFTWavelet']='PIP',
                  verbose = False,
                  wavelet:Literal['db1', 'db2', 'db3', 'db4', 'coif1', 'haar', 'sym5', 'bior3.5']='coif2',
+                 cluster_selection_mode:Literal['best', 'baseline']='best',
                  ) -> None:
             
         self.n_lookback = n_lookback
@@ -37,6 +38,7 @@ class Miner:
         self.n_cluster = n_clusters
 
         self._model_type = model_type
+        self._cluster_selection_mode = cluster_selection_mode
 
         # Store Training Data
         self._data: List = []
@@ -493,9 +495,20 @@ class Miner:
 
         # Store the cluster scores from each data
         cluster_scores = []
+        baseline_long = []
+        baseline_short = []
 
         # Compute the returns
         _returns = np.diff(self._price_data, prepend=self._price_data[0])
+
+        # Baseline Metrics
+        baseline_returns = pd.Series(_returns)
+        baseline_profit_factor = max(qt.stats.profit_factor(baseline_returns), 0)
+        baseline_sharpe_ratio = max(qt.stats.sharpe(baseline_returns), 0)
+        baseline_upi = max(qt.stats.ulcer_performance_index(baseline_returns), 1)
+        baseline_max_dd = qt.stats.max_drawdown(baseline_returns) 
+
+        print(baseline_upi)
 
         # Get the cluster labels
         _labels = self._cluster_labels
@@ -513,12 +526,45 @@ class Miner:
             _signals = self.__apply_holding_period(_signals)
 
             # Get the returns, compute martin score
-            _ret = _signals * _returns
-            cluster_scores.append(self.__compute_martin(_ret))
+            _returns = _signals * _returns
+            _martin = self.__compute_martin(_returns)
+
+            if (_martin is np.inf) or np.isnan(_martin):
+                cluster_scores.append(0)
+            else:
+                cluster_scores.append(_martin)
+                
+            if self._cluster_selection_mode == 'baseline':
+                for direction in [1, -1]:                
+                    # Compute the returns
+                    _ret = pd.Series(_returns * direction)
+
+                    # Compute the kpis
+                    _pf = qt.stats.profit_factor(_ret)
+                    _sharpe = qt.stats.rolling_sharpe(_ret).mean()
+                    _upi = qt.stats.ulcer_performance_index(_ret)
+                    _max_dd = qt.stats.to_drawdown_series(_ret).mean()
+
+                    if (_upi is np.inf) or np.isnan(_upi):
+                        continue
+
+                    if ((_pf > baseline_profit_factor) and
+                        (_sharpe > baseline_sharpe_ratio) and
+                        (_upi > baseline_upi) and 
+                        (_max_dd > baseline_max_dd)):
+                
+                        if direction > 0:
+                            baseline_long.append(_label)
+                        else:
+                            baseline_short.append(_label)
 
         # Append the selected cluster labels
-        self._cluster_labels_long.append(np.argmax(cluster_scores))
-        self._cluster_labels_short.append(np.argmin(cluster_scores))
+        if self._cluster_selection_mode == 'baseline':
+            self._cluster_labels_long = baseline_long
+            self._cluster_labels_short = baseline_short
+        else:
+            self._cluster_labels_long.append(np.argmax(cluster_scores))
+            self._cluster_labels_short.append(np.argmin(cluster_scores))
 
 
     def _compute_performance(self):
@@ -748,20 +794,20 @@ if __name__ == "__main__":
     test_data = test_data.to_numpy()
 
 
-    miner = Miner(25, 10, reducer="Wavelet", wavelet='haar')
+    miner = Miner(25, 4, 16, 3, cluster_selection_mode='')
 
     # print('Successful')
     # miner.fit(np.diff(train_data, prepend=train_data[0]-1), train_data)
     # print(miner.test(np.diff(test_data, prepend=test_data[0]-1), test_data))
 
-    # miner.fit(train_data)
-    miner.fit(np.diff(train_data, prepend=train_data[0]-1), train_data)
+    miner.fit(train_data)
+    # miner.fit(np.diff(train_data, prepend=train_data[0]-1), train_data)
+    print(miner._cluster_labels_long)
+    print(miner._cluster_labels_short)
 
     # miner.save_model(parent_path / 'pipminer.pkl')
-
     # miner : Miner = Miner.load_model(parent_path / 'pipminer.pkl')
-
     # print(miner.transform(test_data))
 
-    # print(miner.test(test_data))
-    print(miner.test(np.diff(test_data, prepend=test_data[0]-1), test_data))
+    # print(miner.test(train_data))
+    # print(miner.test(np.diff(test_data, prepend=test_data[0]-1), test_data))
