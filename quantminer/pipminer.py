@@ -508,8 +508,6 @@ class Miner:
         baseline_upi = max(qt.stats.ulcer_performance_index(baseline_returns), 1)
         baseline_max_dd = qt.stats.max_drawdown(baseline_returns) 
 
-        print(baseline_upi)
-
         # Get the cluster labels
         _labels = self._cluster_labels
 
@@ -562,6 +560,7 @@ class Miner:
         if self._cluster_selection_mode == 'baseline':
             self._cluster_labels_long = baseline_long
             self._cluster_labels_short = baseline_short
+
         else:
             self._cluster_labels_long.append(np.argmax(cluster_scores))
             self._cluster_labels_short.append(np.argmin(cluster_scores))
