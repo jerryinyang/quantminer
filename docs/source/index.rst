@@ -1,23 +1,32 @@
-.. quantminer documentation master file, created by
-   sphinx-quickstart on Thu Jun 27 14:00:25 2024.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
+.. QuantMiner documentation master file
+
 
 QuantMiner
-======================================
+==========
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
+   modules
+
+Modules
+=======
+
 .. automodule:: quantminer
     :members:
     :undoc-members:
     :show-inheritance:
+    :noindex:
 
-Indices and tables
-==================
+.. automodule:: quantminer.classes.reducers
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :noindex:
 
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+.. automodule:: quantminer.classes.seqkmeans
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :noindex:
