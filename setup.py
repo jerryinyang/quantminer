@@ -15,7 +15,7 @@ def read_readme():
 
 setup(
     name="quantminer",
-    version="1.0.0",
+    version="1.0.1",
     description="Data/Pattern Mining Algorithms for Financial Data",
     long_description=read_readme(),
     long_description_content_type="text/x-rst",
