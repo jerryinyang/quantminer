@@ -8,3 +8,4 @@ quantstats
 scikit-learn
 sktime
 tslearn
+sphinx
