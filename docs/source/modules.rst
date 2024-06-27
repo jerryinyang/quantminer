@@ -5,4 +5,3 @@ quantminer
    :maxdepth: 4
 
    quantminer
-   setup
