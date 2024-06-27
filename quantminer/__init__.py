@@ -1,1 +1,3 @@
-from .pipminer import Miner # noqa
+from .pipminer import Miner
+
+__all__ = ["Miner"]

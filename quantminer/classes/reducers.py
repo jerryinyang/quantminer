@@ -8,7 +8,7 @@ class ReducerPIP:
     def __init__(self, n_pivots: int, dist_measure: int) -> None:
         """
         Initialize the ReducerPIP with specified number of pivots and a chosen distance measure.
-        
+
         This reducer implements the Perceptually Important Points (PIP) method, which selects key points
         in the data series that capture significant movements or trends while reducing the dimensionality
         of the data.
@@ -26,7 +26,6 @@ class ReducerPIP:
         """
         self.n_pivots = n_pivots
         self.dist_measure = dist_measure
-
 
     def transform(self, data: Union[np.ndarray, List[np.ndarray]]) -> np.ndarray:
         """
@@ -67,16 +66,26 @@ class ReducerPIP:
                 right_adj = k + 1  # Right adjacent pivot index
 
                 time_diff = pips_indices[right_adj] - pips_indices[left_adj]
-                price_diff = pips_prices[right_adj] - pips_prices[left_adj] + 1e-15  # Avoid division by zero
+                price_diff = (
+                    pips_prices[right_adj] - pips_prices[left_adj] + 1e-15
+                )  # Avoid division by zero
                 slope = price_diff / time_diff
                 intercept = pips_prices[left_adj] - slope * pips_indices[left_adj]
 
                 for i in range(pips_indices[left_adj] + 1, pips_indices[right_adj]):
                     if dist_measure == 1:  # Euclidean distance
-                        distance = np.sqrt((pips_indices[left_adj] - i)**2 + (pips_prices[left_adj] - data[i])**2)
-                        distance += np.sqrt((pips_indices[right_adj] - i)**2 + (pips_prices[right_adj] - data[i])**2)
+                        distance = np.sqrt(
+                            (pips_indices[left_adj] - i) ** 2
+                            + (pips_prices[left_adj] - data[i]) ** 2
+                        )
+                        distance += np.sqrt(
+                            (pips_indices[right_adj] - i) ** 2
+                            + (pips_prices[right_adj] - data[i]) ** 2
+                        )
                     elif dist_measure == 2:  # Perpendicular distance
-                        distance = abs(slope * i + intercept - data[i]) / np.sqrt(slope**2 + 1)
+                        distance = abs(slope * i + intercept - data[i]) / np.sqrt(
+                            slope**2 + 1
+                        )
                     elif dist_measure == 3:  # Vertical distance
                         distance = abs(slope * i + intercept - data[i])
 
@@ -95,7 +104,7 @@ class ReducerFFT:
     def __init__(self, n_components: int) -> None:
         """
         Initialize the ReducerFFT with a specified number of frequency components to retain.
-        
+
         This reducer implements the Fourier Transform method to extract significant frequency
         components from the data, which can capture underlying periodicities and patterns.
 
@@ -128,14 +137,14 @@ class ReducerFFT:
             for _data in data:
                 fft_results.append(self.transform(_data))  # Recursive call for each row
             return np.array(fft_results)
-        
+
         # Perform the FFT on the data
         fft_result = np.fft.fft(data)
         # Compute magnitudes of the FFT components
         magnitudes = np.abs(fft_result)
 
         # Identify indices of the top n_components largest magnitudes
-        indices = np.argsort(magnitudes)[-self.n_components:]
+        indices = np.argsort(magnitudes)[-self.n_components :]
 
         # Create a feature array of the selected FFT magnitudes
         # We sort the indices to maintain a consistent ordering
@@ -143,14 +152,12 @@ class ReducerFFT:
 
         return top_magnitudes
 
-        return np.array(top_magnitudes)
-
 
 class ReducerWavelet:
-    def __init__(self, n_coefficients: int, wavelet: str = 'coif1') -> None:
+    def __init__(self, n_coefficients: int, wavelet: str = "coif1") -> None:
         """
         Initialize the ReducerWavelet with specified number of wavelet coefficients and the type of wavelet.
-        
+
         This reducer applies a discrete wavelet transform to the data to extract important frequency and
         time features using wavelets.
 
@@ -185,16 +192,17 @@ class ReducerWavelet:
             # Process each row of the data array individually
             wavelet_results = []
             for _data in data:
-                wavelet_results.append(self.transform(_data))  # Recursive call for each row
+                wavelet_results.append(
+                    self.transform(_data)
+                )  # Recursive call for each row
             return np.array(wavelet_results)
-        
 
         # Apply discrete wavelet transform
-        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode='symmetric')
+        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode="symmetric")
         # Flatten the list of coefficients
         all_coefficients = np.hstack(coefficients)
         # Find the indices of the largest coefficients by magnitude
-        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_coefficients:]
+        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_coefficients :]
         # Select the largest coefficients
         top_coefficients = all_coefficients[largest_indices]
         # Sort indices for consistent feature ordering
@@ -204,7 +212,7 @@ class ReducerWavelet:
 
 
 class ReducerFFTWavelet:
-    def __init__(self, n_components: int, wavelet: str = 'db1') -> None:
+    def __init__(self, n_components: int, wavelet: str = "db1") -> None:
         """
         Initialize the CombinedReducer with a total number of coefficients to be divided between Fourier and
         wavelet transforms. If n_components is odd, n_wavelet takes the larger share.
@@ -216,7 +224,9 @@ class ReducerFFTWavelet:
             The type of wavelet to use, e.g., 'db1', 'db2', 'coif1', 'haar'.
         """
         self.n_fourier = n_components // 2
-        self.n_wavelet = n_components // 2 + (n_components % 2)  # n_wavelet gets the larger share if odd
+        self.n_wavelet = n_components // 2 + (
+            n_components % 2
+        )  # n_wavelet gets the larger share if odd
         self.wavelet = wavelet
 
     def transform(self, data: np.ndarray) -> np.ndarray:
@@ -237,19 +247,21 @@ class ReducerFFTWavelet:
             # Process each row of the data array individually
             combined_results = []
             for _data in data:
-                combined_results.append(self.transform(_data))  # Recursive call for each row
+                combined_results.append(
+                    self.transform(_data)
+                )  # Recursive call for each row
             return np.array(combined_results)
 
         # Fourier Transform
         fft_result = np.fft.fft(data)
         magnitudes = np.abs(fft_result)
-        top_freq_indices = np.argsort(magnitudes)[-self.n_fourier:]
+        top_freq_indices = np.argsort(magnitudes)[-self.n_fourier :]
         top_frequencies = magnitudes[np.sort(top_freq_indices)]
 
         # Wavelet Transform
-        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode='symmetric')
+        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode="symmetric")
         all_coefficients = np.hstack(coefficients)
-        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_wavelet:]
+        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_wavelet :]
         top_wavelet_coeffs = all_coefficients[np.sort(largest_indices)]
 
         # Combine features
