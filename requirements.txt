@@ -9,3 +9,4 @@ scikit-learn
 sktime
 tslearn
 sphinx
+sphinx_rtd_theme
