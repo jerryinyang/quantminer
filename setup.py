@@ -9,7 +9,7 @@ def read_requirements():
 
 # Read the README file
 def read_readme():
-    with open("README.rst", "r") as f:
+    with open("docs/source/index.rst", "r") as f:
         return f.read()
 
 
