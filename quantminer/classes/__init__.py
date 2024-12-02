@@ -1,5 +1,19 @@
-# from .reducers import ReducerPIP, ReducerFFT, ReducerFFTWavelet, ReducerWavelet
-from . import reducers
+from .reducers import (
+    BaseReducer,
+    DistanceMeasure,
+    ReducerFFT,
+    ReducerFFTWavelet,
+    ReducerPIP,
+    ReducerWavelet,
+)
 from .seqkmeans import SeqKMeans
 
-__all__ = ["SeqKMeans", "reducers"]
+__all__ = [
+    "BaseReducer",
+    "DistanceMeasure",
+    "ReducerFFT",
+    "ReducerFFTWavelet",
+    "ReducerPIP",
+    "ReducerWavelet",
+    "SeqKMeans",
+]

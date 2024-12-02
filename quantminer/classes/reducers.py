@@ -1,270 +1,298 @@
+from enum import Enum
 from typing import List, Union
 
 import numpy as np
 import pywt
+from numpy.typing import NDArray
 
 
-class ReducerPIP:
-    def __init__(self, n_pivots: int, dist_measure: int) -> None:
+class DistanceMeasure(Enum):
+    """Distance measures for PIP reducer"""
+
+    EUCLIDEAN = 1
+    PERPENDICULAR = 2
+    VERTICAL = 3
+
+
+class BaseReducer:
+    """Base class for all reducers with common validation logic"""
+
+    def _validate_input(
+        self, data: Union[NDArray, List[NDArray]], min_length: int
+    ) -> NDArray:
         """
-        Initialize the ReducerPIP with specified number of pivots and a chosen distance measure.
+        Validates and converts input data to proper format
 
-        This reducer implements the Perceptually Important Points (PIP) method, which selects key points
-        in the data series that capture significant movements or trends while reducing the dimensionality
-        of the data.
+        Args:
+            data: Input data to validate
+            min_length: Minimum required length
 
-        Arguments:
-        - n_pivots: int
-            The number of pivots or key points to identify in the dataset. These pivots aim to capture
-            the most informative aspects of the data.
-        - dist_measure: int
-            The metric used to measure distance when identifying pivots. The options are:
-            * 1 = Euclidean Distance - Measures the straight line distance between points.
-            * 2 = Perpendicular Distance - Measures the shortest distance to the line segment between adjacent pivots.
-            * 3 = Vertical Distance - Measures the vertical distance from the data point to the line segment
-              between adjacent pivots.
+        Returns:
+            NDArray: Validated numpy array
+
+        Raises:
+            ValueError: If validation fails
+        """
+        if not isinstance(data, (np.ndarray, list)):
+            raise ValueError("Input must be numpy array or list")
+
+        arr = np.asarray(data)
+        if arr.size == 0:
+            raise ValueError("Empty input array")
+
+        if arr.ndim > 1 and any(len(x) < min_length for x in arr):
+            raise ValueError(f"All sequences must have length >= {min_length}")
+        elif arr.ndim == 1 and len(arr) < min_length:
+            raise ValueError(f"Input length must be >= {min_length}")
+
+        return arr
+
+
+class ReducerPIP(BaseReducer):
+    """
+    Perceptually Important Points (PIP) reducer that identifies key points in time series data.
+    Uses vectorized operations for improved performance.
+    """
+
+    def __init__(
+        self, n_pivots: int, dist_measure: Union[DistanceMeasure, int]
+    ) -> None:
+        """
+        Initialize PIP reducer
+
+        Args:
+            n_pivots: Number of pivot points to extract
+            dist_measure: Distance measure to use (enum or int 1-3)
         """
         self.n_pivots = n_pivots
-        self.dist_measure = dist_measure
+        self.dist_measure = (
+            dist_measure
+            if isinstance(dist_measure, DistanceMeasure)
+            else DistanceMeasure(dist_measure)
+        )
 
-    def transform(self, data: Union[np.ndarray, List[np.ndarray]]) -> np.ndarray:
+    def transform(self, data: Union[NDArray, List[NDArray]]) -> NDArray:
         """
-        Transform the input data by applying the Perceptually Important Points method to reduce its dimensionality.
+        Transform data using PIP algorithm with vectorized operations
 
-        This method processes either a single array or a list of arrays, applying the PIP method to each individually,
-        and returns a transformed version of the input where each original array is reduced to its key pivots.
-
-        Arguments:
-        - data: Union[np.ndarray, List[np.ndarray]]
-            The data to be transformed. Can be a single numpy array or a list of numpy arrays.
+        Args:
+            data: Input time series data
 
         Returns:
-        - np.ndarray
-            The reduced version of the original data, where each array is represented only by its identified pivots.
+            NDArray: Array of pivot points
         """
-        data = np.array(data)
+        data = self._validate_input(data, self.n_pivots)
 
         if data.ndim > 1:
-            pips = []
-            for _data in data:
-                pips.append(self.transform(_data))
-            return np.array(pips)
+            return np.array([self.transform(seq) for seq in data])
 
-        n_pivots = self.n_pivots
-        dist_measure = self.dist_measure
+        pivots = np.zeros(self.n_pivots)
+        indices = np.zeros(self.n_pivots, dtype=int)
 
-        pips_indices = [0, len(data) - 1]  # Start and end points as initial pivots
-        pips_prices = [data[0], data[-1]]  # Values at the start and end points
+        # Initialize with endpoints
+        pivots[0], pivots[-1] = data[0], data[-1]
+        indices[0], indices[-1] = 0, len(data) - 1
 
-        for curr_point in range(2, n_pivots):
-            max_distance = 0.0  # Initialize the maximum distance found to 0
-            max_distance_index = -1  # Index of the point with the maximum distance
-            insert_index = -1  # Index to insert the new pivot
+        # Find remaining pivots
+        for i in range(2, self.n_pivots):
+            max_dist = 0
+            max_idx = -1
+            insert_idx = -1
 
-            for k in range(0, curr_point - 1):
-                left_adj = k  # Left adjacent pivot index
-                right_adj = k + 1  # Right adjacent pivot index
+            # Vectorized distance calculation
+            for j in range(i - 1):
+                left_idx, right_idx = indices[j], indices[j + 1]
+                segment = data[left_idx : right_idx + 1]
+                segment_indices = np.arange(left_idx, right_idx + 1)
 
-                time_diff = pips_indices[right_adj] - pips_indices[left_adj]
-                price_diff = (
-                    pips_prices[right_adj] - pips_prices[left_adj] + 1e-15
-                )  # Avoid division by zero
-                slope = price_diff / time_diff
-                intercept = pips_prices[left_adj] - slope * pips_indices[left_adj]
+                if self.dist_measure == DistanceMeasure.EUCLIDEAN:
+                    dist = self._euclidean_distance(
+                        segment,
+                        segment_indices,
+                        pivots[j],
+                        indices[j],
+                        pivots[j + 1],
+                        indices[j + 1],
+                    )
+                elif self.dist_measure == DistanceMeasure.PERPENDICULAR:
+                    dist = self._perpendicular_distance(
+                        segment,
+                        segment_indices,
+                        pivots[j],
+                        indices[j],
+                        pivots[j + 1],
+                        indices[j + 1],
+                    )
+                else:  # VERTICAL
+                    dist = self._vertical_distance(
+                        segment,
+                        segment_indices,
+                        pivots[j],
+                        indices[j],
+                        pivots[j + 1],
+                        indices[j + 1],
+                    )
 
-                for i in range(pips_indices[left_adj] + 1, pips_indices[right_adj]):
-                    if dist_measure == 1:  # Euclidean distance
-                        distance = np.sqrt(
-                            (pips_indices[left_adj] - i) ** 2
-                            + (pips_prices[left_adj] - data[i]) ** 2
-                        )
-                        distance += np.sqrt(
-                            (pips_indices[right_adj] - i) ** 2
-                            + (pips_prices[right_adj] - data[i]) ** 2
-                        )
-                    elif dist_measure == 2:  # Perpendicular distance
-                        distance = abs(slope * i + intercept - data[i]) / np.sqrt(
-                            slope**2 + 1
-                        )
-                    elif dist_measure == 3:  # Vertical distance
-                        distance = abs(slope * i + intercept - data[i])
+                max_dist_idx = np.argmax(dist)
+                if dist[max_dist_idx] > max_dist:
+                    max_dist = dist[max_dist_idx]
+                    max_idx = segment_indices[max_dist_idx]
+                    insert_idx = j + 1
 
-                    if distance > max_distance:
-                        max_distance = distance
-                        max_distance_index = i
-                        insert_index = right_adj
+            indices = np.insert(indices[:i], insert_idx, max_idx)
+            pivots = np.insert(pivots[:i], insert_idx, data[max_idx])
 
-            pips_indices.insert(insert_index, max_distance_index)
-            pips_prices.insert(insert_index, data[max_distance_index])
+        return pivots
 
-        return np.array(pips_prices)
+    def _euclidean_distance(
+        self,
+        segment: NDArray,
+        indices: NDArray,
+        p1_val: float,
+        p1_idx: int,
+        p2_val: float,
+        p2_idx: int,
+    ) -> NDArray:
+        """Vectorized Euclidean distance calculation"""
+        d1 = np.sqrt((p1_idx - indices) ** 2 + (p1_val - segment) ** 2)
+        d2 = np.sqrt((p2_idx - indices) ** 2 + (p2_val - segment) ** 2)
+        return d1 + d2
+
+    def _perpendicular_distance(
+        self,
+        segment: NDArray,
+        indices: NDArray,
+        p1_val: float,
+        p1_idx: int,
+        p2_val: float,
+        p2_idx: int,
+    ) -> NDArray:
+        """Vectorized perpendicular distance calculation"""
+        dx = p2_idx - p1_idx
+        dy = p2_val - p1_val
+        slope = np.divide(dy, dx, out=np.zeros_like(dy), where=dx != 0)
+        intercept = p1_val - slope * p1_idx
+        return np.abs(slope * indices + intercept - segment) / np.sqrt(slope**2 + 1)
+
+    def _vertical_distance(
+        self,
+        segment: NDArray,
+        indices: NDArray,
+        p1_val: float,
+        p1_idx: int,
+        p2_val: float,
+        p2_idx: int,
+    ) -> NDArray:
+        """Vectorized vertical distance calculation"""
+        dx = p2_idx - p1_idx
+        dy = p2_val - p1_val
+        slope = np.divide(dy, dx, out=np.zeros_like(dy), where=dx != 0)
+        intercept = p1_val - slope * p1_idx
+        return np.abs(slope * indices + intercept - segment)
 
 
-class ReducerFFT:
+class ReducerFFT(BaseReducer):
+    """Fast Fourier Transform based reducer with optimized component selection"""
+
     def __init__(self, n_components: int) -> None:
-        """
-        Initialize the ReducerFFT with a specified number of frequency components to retain.
-
-        This reducer implements the Fourier Transform method to extract significant frequency
-        components from the data, which can capture underlying periodicities and patterns.
-
-        Arguments:
-        - n_components: int
-            The number of dominant frequency components to identify and retain from the FFT of the dataset.
-        """
         self.n_components = n_components
 
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Union[NDArray, List[NDArray]]) -> NDArray:
         """
-        Transform the input data by applying the Fast Fourier Transform (FFT) method to extract
-        significant frequency components.
+        Transform using FFT with optimized component selection
 
-        This method processes a single numpy array, applying the FFT, and returns a transformed version
-        of the input where only the specified number of dominant frequency components are retained.
-
-        Arguments:
-        - data: np.ndarray
-            The data to be transformed. Should be a one-dimensional numpy array.
+        Args:
+            data: Input time series
 
         Returns:
-        - np.ndarray
-            The reduced version of the original data, represented by the amplitudes of its top n_components
-            frequency components.
+            NDArray: Top frequency components
         """
-        if data.ndim > 1:
-            # Process each row of the data array individually
-            fft_results = []
-            for _data in data:
-                fft_results.append(self.transform(_data))  # Recursive call for each row
-            return np.array(fft_results)
+        data = self._validate_input(data, self.n_components)
 
-        # Perform the FFT on the data
+        if data.ndim > 1:
+            return np.array([self.transform(seq) for seq in data])
+
         fft_result = np.fft.fft(data)
-        # Compute magnitudes of the FFT components
         magnitudes = np.abs(fft_result)
 
-        # Identify indices of the top n_components largest magnitudes
-        indices = np.argsort(magnitudes)[-self.n_components :]
-
-        # Create a feature array of the selected FFT magnitudes
-        # We sort the indices to maintain a consistent ordering
-        top_magnitudes = magnitudes[np.sort(indices)]
-
-        return top_magnitudes
+        # Optimize component selection
+        top_indices = np.argpartition(magnitudes, -self.n_components)[
+            -self.n_components :
+        ]
+        return magnitudes[np.sort(top_indices)]
 
 
-class ReducerWavelet:
+class ReducerWavelet(BaseReducer):
+    """Wavelet transform based reducer with coefficient optimization"""
+
     def __init__(self, n_coefficients: int, wavelet: str = "coif1") -> None:
-        """
-        Initialize the ReducerWavelet with specified number of wavelet coefficients and the type of wavelet.
-
-        This reducer applies a discrete wavelet transform to the data to extract important frequency and
-        time features using wavelets.
-
-        Arguments:
-        - n_coefficients: int
-            The number of largest (by magnitude) wavelet coefficients to retain from the wavelet transform.
-        - wavelet: str
-            The type of wavelet to use. Default is 'db1' (Daubechies wavelet with one vanishing moment).
-            Other popular choices include 'db2', 'coif1', 'haar', etc.
-        """
         self.n_coefficients = n_coefficients
         self.wavelet = wavelet
 
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Union[NDArray, List[NDArray]]) -> NDArray:
         """
-        Transform the input data by applying the discrete wavelet transform and retaining a set number
-        of the largest wavelet coefficients.
+        Transform using wavelet decomposition
 
-        This method processes a single numpy array, applies the wavelet transform, and returns a transformed
-        version of the input where only the specified number of largest coefficients are retained.
-
-        Arguments:
-        - data: np.ndarray
-            The data to be transformed. Should be a one-dimensional numpy array.
+        Args:
+            data: Input time series
 
         Returns:
-        - np.ndarray
-            The reduced version of the original data, represented by its significant wavelet coefficients.
+            NDArray: Selected wavelet coefficients
         """
+        data = self._validate_input(data, self.n_coefficients)
 
         if data.ndim > 1:
-            # Process each row of the data array individually
-            wavelet_results = []
-            for _data in data:
-                wavelet_results.append(
-                    self.transform(_data)
-                )  # Recursive call for each row
-            return np.array(wavelet_results)
+            return np.array([self.transform(seq) for seq in data])
 
-        # Apply discrete wavelet transform
-        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode="symmetric")
-        # Flatten the list of coefficients
-        all_coefficients = np.hstack(coefficients)
-        # Find the indices of the largest coefficients by magnitude
-        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_coefficients :]
-        # Select the largest coefficients
-        top_coefficients = all_coefficients[largest_indices]
-        # Sort indices for consistent feature ordering
-        sorted_top_coefficients = top_coefficients[np.argsort(largest_indices)]
+        coeffs = pywt.wavedec(data, self.wavelet, mode="symmetric")
+        flat_coeffs = np.concatenate(coeffs)
 
-        return sorted_top_coefficients
+        # Optimize coefficient selection
+        top_indices = np.argpartition(np.abs(flat_coeffs), -self.n_coefficients)[
+            -self.n_coefficients :
+        ]
+        return flat_coeffs[np.sort(top_indices)]
 
 
-class ReducerFFTWavelet:
+class ReducerFFTWavelet(BaseReducer):
+    """Combined FFT and Wavelet reducer with balanced component selection"""
+
     def __init__(self, n_components: int, wavelet: str = "db1") -> None:
-        """
-        Initialize the CombinedReducer with a total number of coefficients to be divided between Fourier and
-        wavelet transforms. If n_components is odd, n_wavelet takes the larger share.
-
-        Arguments:
-        - n_components: int
-            The total number of Fourier and wavelet transform components to retain.
-        - wavelet: str
-            The type of wavelet to use, e.g., 'db1', 'db2', 'coif1', 'haar'.
-        """
         self.n_fourier = n_components // 2
-        self.n_wavelet = n_components // 2 + (
-            n_components % 2
-        )  # n_wavelet gets the larger share if odd
+        self.n_wavelet = (
+            n_components - self.n_fourier
+        )  # Ensure total equals n_components
         self.wavelet = wavelet
 
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Union[NDArray, List[NDArray]]) -> NDArray:
         """
-        Apply both Fourier and wavelet transforms to the data and combine the top coefficients from each
-        to form a comprehensive feature vector. Supports processing multi-dimensional arrays where each row
-        is treated as a separate dataset.
+        Transform using combined FFT and wavelet analysis
 
-        Arguments:
-        - data: np.ndarray
-            The data to be transformed, can be one-dimensional or multi-dimensional.
+        Args:
+            data: Input time series
 
         Returns:
-        - np.ndarray
-            A combined feature vector consisting of selected Fourier and wavelet transform coefficients.
+            NDArray: Combined frequency and wavelet features
         """
-        if data.ndim > 1:
-            # Process each row of the data array individually
-            combined_results = []
-            for _data in data:
-                combined_results.append(
-                    self.transform(_data)
-                )  # Recursive call for each row
-            return np.array(combined_results)
+        data = self._validate_input(data, max(self.n_fourier, self.n_wavelet))
 
-        # Fourier Transform
+        if data.ndim > 1:
+            return np.array([self.transform(seq) for seq in data])
+
+        # Optimized FFT computation
         fft_result = np.fft.fft(data)
         magnitudes = np.abs(fft_result)
-        top_freq_indices = np.argsort(magnitudes)[-self.n_fourier :]
+        top_freq_indices = np.argpartition(magnitudes, -self.n_fourier)[
+            -self.n_fourier :
+        ]
         top_frequencies = magnitudes[np.sort(top_freq_indices)]
 
-        # Wavelet Transform
-        coefficients = pywt.wavedec(data, wavelet=self.wavelet, mode="symmetric")
-        all_coefficients = np.hstack(coefficients)
-        largest_indices = np.argsort(np.abs(all_coefficients))[-self.n_wavelet :]
-        top_wavelet_coeffs = all_coefficients[np.sort(largest_indices)]
+        # Optimized wavelet computation
+        coeffs = pywt.wavedec(data, self.wavelet, mode="symmetric")
+        flat_coeffs = np.concatenate(coeffs)
+        top_wav_indices = np.argpartition(np.abs(flat_coeffs), -self.n_wavelet)[
+            -self.n_wavelet :
+        ]
+        top_wavelets = flat_coeffs[np.sort(top_wav_indices)]
 
-        # Combine features
-        combined_features = np.concatenate([top_frequencies, top_wavelet_coeffs])
-
-        return combined_features
+        return np.concatenate([top_frequencies, top_wavelets])
