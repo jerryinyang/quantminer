@@ -1,5 +1,6 @@
 import logging
 import warnings
+from collections import deque
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -13,6 +14,8 @@ from .classes.helpers import (
     MiningCore,
     ModelManager,
     ModelTester,
+    MovementStats,
+    ReducerMVR,
     Visualizer,
 )
 
@@ -315,6 +318,22 @@ class Miner:
                 "short"
             ]
 
+            # Restore MVR-specific state if applicable
+            if (
+                isinstance(model.core.reducer, ReducerMVR)
+                and "mvr_params" in model_state
+            ):
+                model.core.reducer.stats = MovementStats(
+                    **model_state["mvr_params"]["stats"]
+                )
+                model.core.reducer.movement_history = deque(
+                    model_state["mvr_params"]["movement_history"],
+                    maxlen=model.core.reducer.normalize_window,
+                )
+                model.core.reducer._last_movement = np.array(
+                    model_state["mvr_params"]["last_movement"]
+                )
+
             model.core.reducer = model_state["model_components"]["reducer"]
             model.core.cluster_model = model_state["model_components"]["cluster_model"]
 
@@ -350,13 +369,25 @@ def validate_config(config: Dict[str, Any]) -> None:
         "n_clusters": (int, lambda x: x > 1),
         "hold_period": (int, lambda x: x >= 0),
         "model_type": (str, lambda x: x in ["standard", "ts", "sequential"]),
-        "reducer_type": (str, lambda x: x in ["FFT", "PIP", "Wavelet", "FFTWavelet"]),
+        "reducer_type": (
+            str,
+            lambda x: x in ["FFT", "PIP", "Wavelet", "FFTWavelet", "MVR"],
+        ),
         "cluster_selection_mode": (str, lambda x: x in ["best", "baseline"]),
     }
 
     optional_params = {
         "wavelet": (str, lambda x: x in ["db1", "db2", "coif1", "haar", "sym5"]),
         "verbose": (bool, lambda x: isinstance(x, bool)),
+        # MVR-specific parameters
+        "normalize_window": (int, lambda x: x > 0),
+        "min_movement": (float, lambda x: 0 < x < 1),
+        "feature_selection": (
+            list,
+            lambda x: all(f in ReducerMVR.FEATURE_NAMES for f in x),
+        ),
+        "trend_window": (int, lambda x: x > 0),
+        "mvr_alpha": (float, lambda x: 0 < x < 1),
     }
 
     # Check required parameters
@@ -506,13 +537,6 @@ def run_mining_test(ohlc_data: pd.DataFrame, config: dict):
         print("\nTest Performance Metrics:")
         for metric, value in test_metrics.items():
             print(f"{metric}: {value:.4f}")
-
-        # Generate predictions for the last n_lookback bars
-        min_required = max(config["n_lookback"], config["n_pivots"])
-        latest_data = close_prices[-min_required:]
-        latest_prediction = miner.predict(latest_data)
-
-        print("Latest Prediction: ", latest_prediction)
 
         # Save the model
         miner.save(Path("trained_model.pkl"))

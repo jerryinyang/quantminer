@@ -22,10 +22,12 @@ from . import (
     DistanceMeasure,
     ReducerFFT,
     ReducerFFTWavelet,
+    ReducerMVR,
     ReducerPIP,
     ReducerWavelet,
     SeqKMeans,
 )
+from .mvr import MovementStats
 
 
 class ModelTester:
@@ -46,9 +48,9 @@ class ModelTester:
 
     def __init__(
         self,
-        preprocessor,  # DataPreprocessor instance
-        mining_core,  # MiningCore instance
-        cluster_evaluator,  # ClusterEvaluator instance
+        preprocessor: "DataPreprocessor",
+        mining_core: "MiningCore",
+        cluster_evaluator: "ClusterEvaluator",
         hold_period: int = 6,
         verbose: bool = False,
     ):
@@ -96,6 +98,11 @@ class ModelTester:
                 f"Length mismatch: price_data is {len(price_data)}, data is {len(data)}"
             )
 
+        # Ensure consistent datetime index
+        if returns_series is not None:
+            if not isinstance(returns_series.index, pd.DatetimeIndex):
+                raise ValueError("returns_series must have DatetimeIndex")
+
         # Preprocess data
         processed_data = self.preprocessor.preprocess_data(data, test_mode=True)
         processed_price = self.preprocessor.preprocess_data(price_data, test_mode=True)
@@ -106,7 +113,9 @@ class ModelTester:
             returns_index = returns_series.index
         else:
             returns = np.diff(processed_price, prepend=processed_price[0])
-            returns_index = None
+            returns_index = pd.date_range(
+                start="2000-01-01", periods=len(returns), freq="D"
+            )
 
         # Generate windows and transform data
         windows = self.preprocessor.generate_training_set(
@@ -118,6 +127,7 @@ class ModelTester:
 
         # Generate cluster labels and signals
         cluster_labels = self.mining_core.predict(pivots)
+
         indices = unique_indices + self.mining_core.n_lookback - 1
         labels = self._assign_labels(processed_data, cluster_labels, indices)
         signals = self._generate_signals(labels, returns)
@@ -168,6 +178,14 @@ class ModelTester:
             train_data = data[train_idx]
             test_data = data[test_idx]
             test_price = price_data[test_idx]
+
+            # Reset MVR state for each fold if using MVR
+            if isinstance(self.core.reducer, ReducerMVR):
+                self.core.reducer.movement_history.clear()
+                self.core.reducer.stats = MovementStats()
+                self.core.reducer._last_movement = np.zeros(
+                    self.core.reducer.FEATURES_PER_PIVOT
+                )
 
             # Train model
             self._train_model(train_data)
@@ -362,7 +380,7 @@ class MiningCore:
         n_pivots: int = 4,
         n_lookback: int = 25,
         model_type: Literal["standard", "ts", "sequential"] = "standard",
-        reducer_type: Literal["FFT", "PIP", "Wavelet", "FFTWavelet"] = "PIP",
+        reducer_type: Literal["FFT", "PIP", "Wavelet", "FFTWavelet", "MVR"] = "PIP",
         wavelet: str = "coif1",
         random_state: int = 14,
         verbose: bool = False,
@@ -413,8 +431,15 @@ class MiningCore:
         if self.verbose:
             logging.info("Fitting clustering model...")
 
-        # Fit the model
-        self.cluster_model.fit(data)
+        try:
+            # Fit the model
+            self.cluster_model.fit(data)
+
+            if self.verbose:
+                logging.info("Model fitting completed")
+        except Exception as e:
+            logging.error(f"Error during model fitting: {e!s}")
+            raise
 
         if self.verbose:
             logging.info("Model fitting completed")
@@ -506,10 +531,9 @@ class MiningCore:
         else:  # sequential
             self.cluster_model = SeqKMeans(
                 n_clusters=self.n_clusters,
-                learning_rate=0.5,
-                centroid_update_threshold_std=3,
-                verbose=self.verbose,
-                fit_method="sequential",
+                distance_metric="euclidean",
+                adaptation_mode="full",
+                learning_rate=0.01,
                 random_state=self.random_state,
             )
 
@@ -536,6 +560,13 @@ class MiningCore:
             return ReducerWavelet(n_coefficients=self.n_pivots, wavelet=wavelet)
         elif reducer_type == "FFTWavelet":
             return ReducerFFTWavelet(n_components=self.n_pivots, wavelet=wavelet)
+        elif reducer_type == "MVR":
+            return ReducerMVR(
+                n_pivots=self.n_pivots,
+                normalize_window=self.n_lookback,
+                min_movement=0.001,
+                trend_window=min(7, self.n_lookback),  # Adaptive trend window
+            )
         else:
             return ReducerPIP(
                 n_pivots=self.n_pivots, dist_measure=DistanceMeasure.EUCLIDEAN
@@ -1171,6 +1202,7 @@ class DataPreprocessor:
         except ValueError as e:
             if test_mode:
                 # Handle validation failures gracefully in test mode by padding
+                logging.warning("Padding the data")
                 if len(data) < n_pivots:
                     # Pad the data to reach n_pivots length
                     pad_length = n_pivots - len(data)
@@ -2116,6 +2148,15 @@ class ModelManager:
                 "cluster_model": getattr(model, "cluster_model", None),
             },
         }
+
+        # Add MVR-specific state if using MVR reducer
+        if isinstance(model.reducer, ReducerMVR):
+            state["mvr_params"] = {
+                "stats": model.reducer.stats.__dict__,
+                "movement_history": list(model.reducer.movement_history),
+                "last_movement": model.reducer._last_movement.tolist(),
+            }
+
         return state
 
     def _validate_state(self, state: Dict[str, Any]) -> None:
