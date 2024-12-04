@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
+import quantstats as qt
 
 from .classes.helpers import (
     ClusterEvaluator,
@@ -94,6 +95,11 @@ class Miner:
         self.visualizer = Visualizer(verbose=self.verbose)
         self.model_manager = ModelManager(verbose=self.verbose)
 
+        # Add storage for training data and labels
+        self._training_data: Optional[np.ndarray] = None
+        self._training_labels: Optional[np.ndarray] = None
+        self._processed_training_data: Optional[np.ndarray] = None
+
     def fit(
         self,
         data: np.ndarray,
@@ -145,6 +151,9 @@ class Miner:
 
             # Fit clustering model
             self.core.fit(transformed_data)
+
+            # Store training labels
+            self._training_labels = self.core.labels_
 
             # Get cluster labels
             labels = self.core.labels_
@@ -219,7 +228,7 @@ class Miner:
         )
         return transformed_data
 
-    def evaluate(
+    def evaluate_old(
         self,
         data: np.ndarray,
         price_data: Optional[np.ndarray] = None,
@@ -266,6 +275,93 @@ class Miner:
 
             self.visualizer.plot_cluster_performance(cluster_metrics)
             self.visualizer.create_performance_dashboard(returns, predictions, metrics)
+
+        return metrics
+
+    def evaluate(
+        self,
+        data: np.ndarray,
+        price_data: Optional[np.ndarray] = None,
+        returns_series: Optional[pd.Series] = None,
+        plot_results: bool = False,
+    ) -> Dict[str, float]:
+        """
+        Evaluate model performance on test data.
+        """
+        if price_data is None:
+            price_data = np.copy(data)
+
+        # Test model
+        martin_ratio, metrics = self.tester.test_model(
+            data, price_data, returns_series=returns_series, plot_equity=plot_results
+        )
+
+        if plot_results:
+            # Get predictions and indices where patterns were not removed
+            processed_data = self.preprocessor.preprocess_data(data, test_mode=True)
+            windows = self.preprocessor.generate_training_set(
+                processed_data, self.config["n_lookback"], test_mode=True
+            )
+            transformed_data, valid_indices = self.preprocessor.transform_data(
+                windows, self.config["n_pivots"], self.core.reducer, test_mode=True
+            )
+            predictions = self.core.predict(transformed_data)
+
+            # Adjust indices for lookback
+            valid_indices = valid_indices + self.config["n_lookback"] - 1
+
+            # Handle returns and datetime index
+            if returns_series is not None:
+                # Use the original returns series index
+                returns = returns_series.values
+                returns_index = returns_series.index
+            else:
+                # Create returns and a default datetime index
+                returns = np.diff(price_data, prepend=price_data[0])
+                returns_index = pd.date_range(
+                    start="2000-01-01", periods=len(returns), freq="D"
+                )
+
+            # Ensure we use the correct subset of returns and index
+            returns = returns[valid_indices]
+            returns_index = returns_index[valid_indices]
+
+            # Now lengths should match
+            assert len(returns) == len(
+                predictions
+            ), "Returns and predictions length mismatch"
+
+            # Calculate per-cluster metrics
+            cluster_metrics = {}
+            for i in range(self.config["n_clusters"]):
+                # Create mask for current cluster
+                cluster_mask = predictions == i
+                if np.any(cluster_mask):
+                    # Calculate cluster-specific returns with datetime index
+                    cluster_returns = pd.Series(
+                        returns[cluster_mask], index=returns_index[cluster_mask]
+                    )
+
+                    # Calculate metrics for this cluster
+                    cluster_metrics[i] = {
+                        "martin_ratio": float(
+                            qt.stats.ulcer_performance_index(cluster_returns)
+                        ),
+                        "sharpe_ratio": float(qt.stats.sharpe(cluster_returns)),
+                        "profit_factor": float(qt.stats.profit_factor(cluster_returns)),
+                    }
+                else:
+                    # Handle empty clusters
+                    cluster_metrics[i] = {
+                        "martin_ratio": 0,
+                        "sharpe_ratio": 0,
+                        "profit_factor": 0,
+                    }
+
+            self.visualizer.plot_cluster_performance(cluster_metrics)
+            self.visualizer.create_performance_dashboard(
+                returns_series, predictions, metrics
+            )
 
         return metrics
 
@@ -342,6 +438,17 @@ class Miner:
         except Exception as e:
             logging.error(f"Error loading model: {e!s}")
             raise
+
+    def get_training_data(self, processed: bool = False) -> Optional[np.ndarray]:
+        """Retrieve the original training data."""
+        if processed:
+            return self._processed_training_data
+        return self._training_data
+
+    @property
+    def labels(self) -> Optional[np.ndarray]:
+        """Retrieve the training labels."""
+        return self._training_labels
 
 
 class ErrorType(Enum):

@@ -1495,12 +1495,6 @@ class Visualizer:
     ) -> None:
         """
         Visualize performance metrics for each cluster.
-
-        Args:
-            cluster_metrics (Dict[int, Dict[str, float]]): Performance metrics by cluster
-            title (str): Plot title
-            metrics (List[str], optional): Specific metrics to plot
-            save (bool): Whether to save the plot
         """
         if metrics is None:
             metrics = ["martin_ratio", "sharpe_ratio", "profit_factor"]
@@ -1513,10 +1507,12 @@ class Visualizer:
             axes = np.array([axes])
 
         for i, metric in enumerate(metrics):
-            values = [m[metric] for m in cluster_metrics.values()]
-            ax = axes[i]
+            # Extract values and ensure cluster indices are numeric
+            clusters = np.array(list(cluster_metrics.keys()), dtype=int)
+            values = [cluster_metrics[k][metric] for k in clusters]
 
-            sns.barplot(x=list(cluster_metrics.keys()), y=values, ax=ax)
+            ax = axes[i]
+            sns.barplot(x=clusters, y=values, ax=ax)  # Use numeric clusters directly
             ax.set_title(f"{metric} by Cluster")
             ax.set_xlabel("Cluster")
             ax.set_ylabel(metric)
@@ -2037,6 +2033,14 @@ class ModelManager:
             with open(path, "rb") as f:
                 self.model_state = pickle.load(f)
 
+                # Ensure backward compatibility with older saved models
+                if "training_data" not in self.model_state:
+                    self.model_state["training_data"] = {
+                        "original": None,
+                        "processed": None,
+                        "labels": None,
+                    }
+
             if self.verbose:
                 logging.info(f"Model loaded successfully from {path}")
 
@@ -2147,15 +2151,12 @@ class ModelManager:
                 "reducer": getattr(model, "reducer", None),
                 "cluster_model": getattr(model, "cluster_model", None),
             },
+            "training_data": {
+                "original": getattr(model, "_training_data", None),
+                "processed": getattr(model, "_processed_training_data", None),
+                "labels": getattr(model, "_training_labels", None),
+            },
         }
-
-        # Add MVR-specific state if using MVR reducer
-        if isinstance(model.reducer, ReducerMVR):
-            state["mvr_params"] = {
-                "stats": model.reducer.stats.__dict__,
-                "movement_history": list(model.reducer.movement_history),
-                "last_movement": model.reducer._last_movement.tolist(),
-            }
 
         return state
 
