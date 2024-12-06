@@ -1,22 +1,21 @@
 import logging
 import warnings
-from collections import deque
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
-import quantstats as qt
 
+from .classes.evaluators import (
+    EvaluatorType,
+    HoldingPeriodEvaluator,
+    VectorPatternEvaluator,
+)
 from .classes.helpers import (
-    ClusterEvaluator,
     DataPreprocessor,
     MiningCore,
     ModelManager,
     ModelTester,
-    MovementStats,
-    ReducerMVR,
     Visualizer,
 )
 
@@ -55,7 +54,6 @@ class Miner:
                 - model_type: Type of clustering model
                 - reducer_type: Type of dimensionality reducer
                 - wavelet: Type of wavelet
-                - cluster_selection_mode: Mode for selecting clusters
                 - verbose: Enable logging
         """
         self.config = config
@@ -78,11 +76,7 @@ class Miner:
             verbose=self.verbose,
         )
 
-        self.evaluator = ClusterEvaluator(
-            selection_mode=config["cluster_selection_mode"],
-            hold_period=config["hold_period"],
-            verbose=self.verbose,
-        )
+        self.evaluator = self._init_evaluator(config)
 
         self.tester = ModelTester(
             self.preprocessor,
@@ -100,7 +94,7 @@ class Miner:
         self._training_labels: Optional[np.ndarray] = None
         self._processed_training_data: Optional[np.ndarray] = None
 
-    def fit(
+    def fit_old(
         self,
         data: np.ndarray,
         price_data: Optional[np.ndarray] = None,
@@ -128,7 +122,7 @@ class Miner:
             processed_data = self.preprocessor.preprocess_data(data)
             processed_price = self.preprocessor.preprocess_data(price_data)
 
-            # Use provided returns_series if available, otherwise calculate returns
+            # Handle returns calculation
             if returns_series is not None:
                 returns = returns_series
             else:
@@ -152,17 +146,98 @@ class Miner:
             # Fit clustering model
             self.core.fit(transformed_data)
 
-            # Store training labels
+            # Store training data and labels
+            self._training_data = data
+            self._processed_training_data = processed_data
             self._training_labels = self.core.labels_
 
-            # Get cluster labels
-            labels = self.core.labels_
+            # Evaluate clusters using new evaluator
+            self.evaluator.evaluate_all_clusters(
+                data=transformed_data, labels=self.core.labels_, returns=returns
+            )
 
-            # Assess clusters and select best performers
-            self.evaluator.assess_clusters(labels, returns, self.config["n_clusters"])
+            # Calculate overall performance
+            performance = self.evaluator.compute_performance(self.core.labels_, returns)
 
-            # Calculate performance
-            performance = self.evaluator.compute_performance(labels, returns)
+            if self.verbose:
+                logging.info(f"Training completed with performance: {performance:.4f}")
+
+            return performance
+
+        except Exception as e:
+            logging.error(f"Error during training: {e!s}")
+            raise
+
+    def fit(
+        self,
+        data: np.ndarray,
+        price_data: Optional[np.ndarray] = None,
+        returns_series: Optional[pd.Series] = None,
+    ) -> float:
+        """
+        Fit the model to training data.
+
+        Args:
+            data: Input training data
+            price_data: Optional price data for returns calculation
+            returns_series: Optional pre-calculated returns with datetime index
+
+        Returns:
+            float: Training performance score
+        """
+        if price_data is None:
+            price_data = np.copy(data)
+
+        try:
+            # Preprocess data
+            processed_data = self.preprocessor.preprocess_data(data)
+            processed_price = self.preprocessor.preprocess_data(price_data)
+
+            # Handle returns calculation
+            if returns_series is not None:
+                returns = returns_series
+            else:
+                returns = pd.Series(
+                    np.diff(processed_price, prepend=processed_price[0]),
+                    index=pd.date_range(
+                        start="2000-01-01", periods=len(processed_price), freq="D"
+                    ),
+                )
+
+            # Generate training windows
+            windows, _ = self.preprocessor.generate_training_set(
+                processed_data, self.config["n_lookback"]
+            )
+
+            # Transform data
+            transformed_data = self.preprocessor.transform_data(
+                windows, self.config["n_pivots"], self.core.reducer
+            )
+
+            # Fit clustering model
+            self.core.fit(transformed_data)
+
+            # Store training data and labels
+            self._training_data = data
+            self._processed_training_data = processed_data
+            self._training_labels = self.core.labels_
+
+            # Align returns with the transformed data windows
+            # Each window label corresponds to the return following that window
+            aligned_returns = returns[
+                self.config["n_lookback"] : len(self.core.labels_)
+                + self.config["n_lookback"]
+            ]
+
+            # Evaluate clusters using new evaluator
+            self.evaluator.evaluate_all_clusters(
+                data=transformed_data, labels=self.core.labels_, returns=aligned_returns
+            )
+
+            # Calculate overall performance
+            performance = self.evaluator.compute_performance(
+                self.core.labels_, aligned_returns
+            )
 
             if self.verbose:
                 logging.info(f"Training completed with performance: {performance:.4f}")
@@ -228,7 +303,7 @@ class Miner:
         )
         return transformed_data
 
-    def evaluate_old(
+    def evaluate(
         self,
         data: np.ndarray,
         price_data: Optional[np.ndarray] = None,
@@ -250,133 +325,120 @@ class Miner:
         if price_data is None:
             price_data = np.copy(data)
 
-        # Test model
-        martin_ratio, metrics = self.tester.test_model(
-            data, price_data, returns_series=returns_series, plot_equity=plot_results
-        )
-
-        if plot_results:
-            # Get predictions and returns for visualization
-            predictions = self.predict(data)
-            if returns_series is not None:
-                returns = returns_series.values
-            else:
-                returns = np.diff(price_data, prepend=price_data[0])
-
-            # Create visualizations
-            # Convert metrics to per-cluster format for visualization
-            cluster_metrics = {}
-            for i in range(self.config["n_clusters"]):
-                cluster_metrics[i] = {
-                    "martin_ratio": metrics.get("martin_ratio", 0),
-                    "sharpe_ratio": metrics.get("sharpe_ratio", 0),
-                    "profit_factor": metrics.get("profit_factor", 0),
-                }
-
-            self.visualizer.plot_cluster_performance(cluster_metrics)
-            self.visualizer.create_performance_dashboard(returns, predictions, metrics)
-
-        return metrics
-
-    def evaluate(
-        self,
-        data: np.ndarray,
-        price_data: Optional[np.ndarray] = None,
-        returns_series: Optional[pd.Series] = None,
-        plot_results: bool = False,
-    ) -> Dict[str, float]:
-        """
-        Evaluate model performance on test data.
-        """
-        if price_data is None:
-            price_data = np.copy(data)
-
-        # Test model
-        martin_ratio, metrics = self.tester.test_model(
-            data, price_data, returns_series=returns_series, plot_equity=plot_results
-        )
-
-        if plot_results:
-            # Get predictions and indices where patterns were not removed
+        try:
+            # Preprocess data
             processed_data = self.preprocessor.preprocess_data(data, test_mode=True)
+            processed_price = self.preprocessor.preprocess_data(
+                price_data, test_mode=True
+            )
+
+            # Generate windows and transform data
             windows = self.preprocessor.generate_training_set(
                 processed_data, self.config["n_lookback"], test_mode=True
             )
             transformed_data, valid_indices = self.preprocessor.transform_data(
                 windows, self.config["n_pivots"], self.core.reducer, test_mode=True
             )
+
+            # Generate predictions
             predictions = self.core.predict(transformed_data)
 
-            # Adjust indices for lookback
-            valid_indices = valid_indices + self.config["n_lookback"] - 1
-
-            # Handle returns and datetime index
+            # Handle returns alignment
             if returns_series is not None:
-                # Use the original returns series index
-                returns = returns_series.values
-                returns_index = returns_series.index
+                returns = returns_series
             else:
-                # Create returns and a default datetime index
-                returns = np.diff(price_data, prepend=price_data[0])
-                returns_index = pd.date_range(
-                    start="2000-01-01", periods=len(returns), freq="D"
+                returns = pd.Series(
+                    np.diff(processed_price, prepend=processed_price[0]),
+                    index=pd.date_range(
+                        start="2000-01-01", periods=len(processed_price), freq="D"
+                    ),
                 )
 
-            # Ensure we use the correct subset of returns and index
-            returns = returns[valid_indices]
-            returns_index = returns_index[valid_indices]
+            # Adjust indices for lookback and transform window
+            valid_indices = valid_indices + self.config["n_lookback"] - 1
+            aligned_returns = returns.iloc[valid_indices]
 
-            # Now lengths should match
-            assert len(returns) == len(
-                predictions
-            ), "Returns and predictions length mismatch"
-
-            # Calculate per-cluster metrics
-            cluster_metrics = {}
-            for i in range(self.config["n_clusters"]):
-                # Create mask for current cluster
-                cluster_mask = predictions == i
-                if np.any(cluster_mask):
-                    # Calculate cluster-specific returns with datetime index
-                    cluster_returns = pd.Series(
-                        returns[cluster_mask], index=returns_index[cluster_mask]
-                    )
-
-                    # Calculate metrics for this cluster
-                    cluster_metrics[i] = {
-                        "martin_ratio": float(
-                            qt.stats.ulcer_performance_index(cluster_returns)
-                        ),
-                        "sharpe_ratio": float(qt.stats.sharpe(cluster_returns)),
-                        "profit_factor": float(qt.stats.profit_factor(cluster_returns)),
-                    }
-                else:
-                    # Handle empty clusters
-                    cluster_metrics[i] = {
-                        "martin_ratio": 0,
-                        "sharpe_ratio": 0,
-                        "profit_factor": 0,
-                    }
-
-            self.visualizer.plot_cluster_performance(cluster_metrics)
-            self.visualizer.create_performance_dashboard(
-                returns_series, predictions, metrics
+            # Ensure predictions and returns match
+            assert len(predictions) == len(aligned_returns), (
+                f"Length mismatch: predictions={len(predictions)}, "
+                f"returns={len(aligned_returns)}"
             )
 
-        return metrics
+            # Evaluate using aligned data
+            if isinstance(self.evaluator, VectorPatternEvaluator):
+                metrics = self.evaluator.evaluate_all_clusters(
+                    data=transformed_data, labels=predictions
+                )
+            else:
+                metrics = self.evaluator.evaluate_all_clusters(
+                    data=transformed_data, labels=predictions, returns=aligned_returns
+                )
 
-    def save(self, path: Union[str, Path]) -> None:
+            # Format metrics for visualization
+            display_metrics = {}
+            for cluster_id, stats in metrics.items():
+                if hasattr(stats, "mean_score"):
+                    # Include only numeric metrics for visualization
+                    display_metrics[f"Cluster_{cluster_id}"] = {
+                        "mean_score": float(stats.mean_score),
+                        "score_std": float(stats.score_std),
+                        "sample_size": int(stats.sample_size),
+                    }
+
+            if plot_results:
+                self._create_evaluation_plots(
+                    transformed_data,
+                    predictions,
+                    aligned_returns,
+                    valid_indices,
+                    display_metrics,
+                )
+
+            return metrics
+
+        except Exception as e:
+            logging.error(f"Error during evaluation: {e!s}")
+            raise
+
+    def save(self, path: Path) -> None:
         """
-        Save the model to disk.
+        Save model state to disk.
 
         Args:
             path: Path to save the model
-
-        Raises:
-            IOError: If save operation fails
         """
         try:
-            self.model_manager.save_model(self, path)
+            # Get evaluator state
+            evaluator_state = {
+                "type": type(self.evaluator).__name__,
+                "params": self.evaluator.__dict__,
+                "cluster_stats": self.evaluator.cluster_stats,
+                "selected_long": self.evaluator.selected_long,
+                "selected_short": self.evaluator.selected_short,
+            }
+
+            # Update model state with evaluator
+            model_state = {
+                "config": self.config,
+                "evaluator_state": evaluator_state,
+                "preprocessor_state": {
+                    "data_min": self.preprocessor._data_min,
+                    "data_max": self.preprocessor._data_max,
+                },
+                "core_state": {
+                    "cluster_model": self.core.cluster_model,
+                    "reducer": self.core.reducer,
+                },
+                "training_data": {
+                    "original": self._training_data,
+                    "processed": self._processed_training_data,
+                    "labels": self._training_labels,
+                },
+            }
+
+            # Save state
+            self.model_manager.save_model(model_state, path)
+
         except Exception as e:
             logging.error(f"Error saving model: {e!s}")
             raise
@@ -396,44 +458,40 @@ class Miner:
             FileNotFoundError: If model file doesn't exist
         """
         try:
+            # Load model state
             model_state = ModelManager().load_model(path)
 
-            # Recreate model with saved configuration
-            model = cls(model_state["model_params"])
+            # Create new instance with saved config
+            instance = cls(model_state["config"])
 
-            # Restore component states
-            model.preprocessor._data_min = model_state["preprocessing_params"][
+            # Restore preprocessor state
+            instance.preprocessor._data_min = model_state["preprocessor_state"][
                 "data_min"
             ]
-            model.preprocessor._data_max = model_state["preprocessing_params"][
+            instance.preprocessor._data_max = model_state["preprocessor_state"][
                 "data_max"
             ]
 
-            model.evaluator.cluster_labels_long = model_state["cluster_labels"]["long"]
-            model.evaluator.cluster_labels_short = model_state["cluster_labels"][
-                "short"
+            # Restore core state
+            instance.core.cluster_model = model_state["core_state"]["cluster_model"]
+            instance.core.reducer = model_state["core_state"]["reducer"]
+
+            # Restore training data
+            instance._training_data = model_state["training_data"]["original"]
+            instance._processed_training_data = model_state["training_data"][
+                "processed"
             ]
+            instance._training_labels = model_state["training_data"]["labels"]
 
-            # Restore MVR-specific state if applicable
-            if (
-                isinstance(model.core.reducer, ReducerMVR)
-                and "mvr_params" in model_state
-            ):
-                model.core.reducer.stats = MovementStats(
-                    **model_state["mvr_params"]["stats"]
-                )
-                model.core.reducer.movement_history = deque(
-                    model_state["mvr_params"]["movement_history"],
-                    maxlen=model.core.reducer.normalize_window,
-                )
-                model.core.reducer._last_movement = np.array(
-                    model_state["mvr_params"]["last_movement"]
-                )
+            # Restore evaluator state
+            evaluator_state = model_state["evaluator_state"]
+            instance.evaluator = instance._init_evaluator(instance.config)
+            instance.evaluator.__dict__.update(evaluator_state["params"])
+            instance.evaluator.cluster_stats = evaluator_state["cluster_stats"]
+            instance.evaluator.selected_long = evaluator_state["selected_long"]
+            instance.evaluator.selected_short = evaluator_state["selected_short"]
 
-            model.core.reducer = model_state["model_components"]["reducer"]
-            model.core.cluster_model = model_state["model_components"]["cluster_model"]
-
-            return model
+            return instance
 
         except Exception as e:
             logging.error(f"Error loading model: {e!s}")
@@ -445,233 +503,89 @@ class Miner:
             return self._processed_training_data
         return self._training_data
 
+    def _create_evaluation_plots(
+        self,
+        data: np.ndarray,
+        predictions: np.ndarray,
+        returns: pd.Series,
+        valid_indices: np.ndarray,
+        metrics: Dict[str, float],
+    ) -> None:
+        """
+        Create evaluation plots using the visualizer.
+
+        Args:
+            data: Transformed data
+            predictions: Model predictions
+            returns: Returns series
+            valid_indices: Valid indices for signals
+            metrics: Performance metrics
+        """
+        # Create performance dashboard
+        self.visualizer.create_performance_dashboard(
+            returns.values, predictions, metrics
+        )
+
+        # Format cluster metrics for plotting
+        cluster_metrics = {}
+        for cluster_id in range(self.config["n_clusters"]):
+            if cluster_id in self.evaluator.cluster_stats:
+                stats = self.evaluator.cluster_stats[cluster_id]
+                cluster_metrics[cluster_id] = {
+                    "mean_score": float(stats.mean_score),
+                    "std_dev": float(stats.score_std),
+                    "sample_size": int(stats.sample_size),
+                }
+                # Add confidence interval if available
+                if hasattr(stats, "confidence_interval"):
+                    cluster_metrics[cluster_id]["conf_lower"] = float(
+                        stats.confidence_interval[0]
+                    )
+                    cluster_metrics[cluster_id]["conf_upper"] = float(
+                        stats.confidence_interval[1]
+                    )
+
+        if cluster_metrics:
+            self.visualizer.plot_cluster_performance(
+                cluster_metrics,
+                metrics=[
+                    "mean_score",
+                    "std_dev",
+                    "sample_size",
+                ],  # Specify metrics to plot
+            )
+
+    def _init_evaluator(self, config: Dict[str, Any]):
+        """
+        Initialize appropriate evaluator based on configuration.
+
+        Args:
+            config: Validated configuration dictionary
+
+        Returns:
+            BaseClusterEvaluator: Initialized evaluator instance
+        """
+        evaluator_type = config.get("evaluator_type", EvaluatorType.HOLDING_PERIOD)
+        evaluator_params = config.get("evaluator_params", {})
+
+        if evaluator_type == EvaluatorType.HOLDING_PERIOD:
+            return HoldingPeriodEvaluator(
+                n_clusters=config["n_clusters"],
+                hold_period=config["hold_period"],
+                min_samples=evaluator_params.get("min_samples", 50),
+                baseline_threshold=evaluator_params.get("baseline_threshold", 0.0),
+            )
+        else:  # VECTOR_PATTERN
+            return VectorPatternEvaluator(
+                n_clusters=config["n_clusters"],
+                n_future_vectors=evaluator_params.get("n_future_vectors", 5),
+                n_features=evaluator_params.get("n_features", 8),
+                min_samples=evaluator_params.get("min_samples", 50),
+                confidence_level=evaluator_params.get("confidence_level", 0.95),
+                min_movement=evaluator_params.get("min_movement", 0.001),
+            )
+
     @property
     def labels(self) -> Optional[np.ndarray]:
         """Retrieve the training labels."""
         return self._training_labels
-
-
-class ErrorType(Enum):
-    """Enumeration of different error types for error handling."""
-
-    PREPROCESSING = "preprocessing"
-    CLUSTERING = "clustering"
-    DATA_VALIDATION = "data_validation"
-    CONFIGURATION = "configuration"
-
-
-def validate_config(config: Dict[str, Any]) -> None:
-    """
-    Validate configuration parameters.
-
-    Args:
-        config: Configuration dictionary to validate
-
-    Raises:
-        ValueError: If required parameters are missing or invalid
-    """
-    required_params = {
-        "n_lookback": (int, lambda x: x > 0),
-        "n_pivots": (int, lambda x: x > 0),
-        "n_clusters": (int, lambda x: x > 1),
-        "hold_period": (int, lambda x: x >= 0),
-        "model_type": (str, lambda x: x in ["standard", "ts", "sequential"]),
-        "reducer_type": (
-            str,
-            lambda x: x in ["FFT", "PIP", "Wavelet", "FFTWavelet", "MVR"],
-        ),
-        "cluster_selection_mode": (str, lambda x: x in ["best", "baseline"]),
-    }
-
-    optional_params = {
-        "wavelet": (str, lambda x: x in ["db1", "db2", "coif1", "haar", "sym5"]),
-        "verbose": (bool, lambda x: isinstance(x, bool)),
-        # MVR-specific parameters
-        "normalize_window": (int, lambda x: x > 0),
-        "min_movement": (float, lambda x: 0 < x < 1),
-        "feature_selection": (
-            list,
-            lambda x: all(f in ReducerMVR.FEATURE_NAMES for f in x),
-        ),
-        "trend_window": (int, lambda x: x > 0),
-        "mvr_alpha": (float, lambda x: 0 < x < 1),
-    }
-
-    # Check required parameters
-    for param, (param_type, validator) in required_params.items():
-        if param not in config:
-            raise ValueError(f"Missing required parameter: {param}")
-        if not isinstance(config[param], param_type):
-            raise ValueError(f"Invalid type for {param}: expected {param_type}")
-        if not validator(config[param]):
-            raise ValueError(f"Invalid value for {param}: {config[param]}")
-
-    # Check optional parameters if present
-    for param, (param_type, validator) in optional_params.items():
-        if param in config:
-            if not isinstance(config[param], param_type):
-                raise ValueError(f"Invalid type for {param}: expected {param_type}")
-            if not validator(config[param]):
-                raise ValueError(f"Invalid value for {param}: {config[param]}")
-
-
-def validate_data_format(data: np.ndarray) -> None:
-    """
-    Validate input data format and structure.
-
-    Args:
-        data: Input data array to validate
-
-    Raises:
-        ValueError: If data format is invalid
-    """
-    if not isinstance(data, (np.ndarray, list)):
-        raise ValueError("Data must be numpy array or list")
-
-    data = np.asarray(data)
-
-    if data.size == 0:
-        raise ValueError("Empty data array")
-
-    if not np.issubdtype(data.dtype, np.number):
-        raise ValueError("Data must contain numeric values")
-
-    if not np.all(np.isfinite(data)):
-        raise ValueError("Data contains NaN or infinite values")
-
-
-def setup_logging(
-    verbose: bool, log_file: Optional[str] = None, level: str = "INFO"
-) -> None:
-    """
-    Setup logging configuration.
-
-    Args:
-        verbose: Enable verbose output
-        log_file: Optional path to log file
-        level: Logging level
-    """
-    log_format = "%(asctime)s - %(levelname)s - %(message)s"
-
-    if verbose:
-        handlers = []
-
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format))
-        handlers.append(console_handler)
-
-        # File handler if specified
-        if log_file:
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setFormatter(logging.Formatter(log_format))
-            handlers.append(file_handler)
-
-        # Configure logging
-        logging.basicConfig(
-            level=getattr(logging, level.upper()), handlers=handlers, force=True
-        )
-
-        logging.info("Logging setup completed")
-
-
-def log_progress(
-    message: str, level: str = "INFO", error: Optional[Exception] = None
-) -> None:
-    """
-    Log progress messages with consistent formatting.
-
-    Args:
-        message: Message to log
-        level: Logging level
-        error: Optional exception to include in log
-    """
-    log_method = getattr(logging, level.lower())
-
-    if error:
-        log_method(f"{message}: {error!s}")
-    else:
-        log_method(message)
-
-
-def run_mining_test(ohlc_data: pd.DataFrame, config: dict):
-    """
-    Run complete test of the mining framework.
-
-    Args:
-        ohlc_data: DataFrame with OHLC data
-    """
-    # Setup logging
-    setup_logging(True, "mining_test.log")
-
-    try:
-        # Use returns from the dataframe if available
-        if "returns" in ohlc_data.columns:
-            returns_series = ohlc_data["returns"]
-        else:
-            returns_series = None
-
-        close_prices = ohlc_data["close"].values
-
-        # Split data into train and test sets ensuring proper indexing
-        split_idx = int(len(close_prices) * 0.7)
-        train_data = close_prices[:split_idx]
-        test_data = close_prices[split_idx:]
-
-        if returns_series is not None:
-            # Ensure returns series indices match the data splits
-            train_returns = returns_series.iloc[:split_idx].copy()
-            test_returns = returns_series.iloc[split_idx:].copy()
-        else:
-            train_returns = None
-            test_returns = None
-
-        # Initialize miner
-        miner = Miner(config)
-
-        # Train model
-        log_progress("Starting model training")
-        train_performance = miner.fit(train_data, returns_series=train_returns)
-        log_progress(f"Training completed with performance: {train_performance:.4f}")
-
-        # Evaluate on test data
-        log_progress("\n\n\nStarting model evaluation")
-        test_metrics = miner.evaluate(
-            test_data, returns_series=test_returns, plot_results=True
-        )
-
-        # Print test metrics
-        print("\nTest Performance Metrics:")
-        for metric, value in test_metrics.items():
-            print(f"{metric}: {value:.4f}")
-
-        # Save the model
-        miner.save(Path("trained_model.pkl"))
-
-        return miner, test_metrics
-
-    except Exception as e:
-        log_progress("Error during testing", "ERROR", e)
-        raise
-
-
-# Example usage
-if __name__ == "__main__":
-    # Load your OHLC data
-    # Example: Loading from CSV
-    ohlc_data = pd.read_csv("your_data.csv")
-
-    # Run the test
-    miner, metrics = run_mining_test(ohlc_data)
-
-    # Example of loading and using a saved model
-    loaded_miner = Miner.load(Path("trained_model.pkl"))
-
-    # Generate signals for new data
-    new_data = ohlc_data["close"].values[-100:]  # Last 100 bars
-    predictions = loaded_miner.predict(new_data)
-
-    # Create custom visualization
-    loaded_miner.visualizer.plot_equity_curve(
-        returns=np.diff(new_data), title="Recent Performance"
-    )

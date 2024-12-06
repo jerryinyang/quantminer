@@ -10,10 +10,8 @@ import plotly.graph_objects as go
 import quantstats as qt
 import seaborn as sns
 from dtaidistance import dtw
-from kneed import KneeLocator
 from plotly.subplots import make_subplots
-from sklearn.cluster import Birch, KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.cluster import KMeans
 from sklearn.model_selection import TimeSeriesSplit
 from sktime.clustering.k_means import TimeSeriesKMeansTslearn
 
@@ -27,6 +25,7 @@ from . import (
     ReducerWavelet,
     SeqKMeans,
 )
+from .evaluators import HoldingPeriodEvaluator, VectorPatternEvaluator
 from .mvr import MovementStats
 
 
@@ -50,27 +49,26 @@ class ModelTester:
         self,
         preprocessor: "DataPreprocessor",
         mining_core: "MiningCore",
-        cluster_evaluator: "ClusterEvaluator",
+        evaluator: Union[HoldingPeriodEvaluator, VectorPatternEvaluator],
         hold_period: int = 6,
         verbose: bool = False,
     ):
         """
-        Initialize the ModelTester.
+        Initialize the ModelTester with updated evaluator support.
 
         Args:
             preprocessor: DataPreprocessor instance for data preparation
-            mining_core: MiningCore instance for clustering and signal generation
-            cluster_evaluator: ClusterEvaluator instance for performance evaluation
-            hold_period (int): Number of periods to hold positions
-            verbose (bool): Enable detailed logging output
+            mining_core: MiningCore instance for clustering
+            evaluator: Evaluator instance (HoldingPeriod or VectorPattern)
+            hold_period: Number of periods to hold positions
+            verbose: Enable detailed logging output
         """
         self.preprocessor = preprocessor
         self.mining_core = mining_core
-        self.cluster_evaluator = cluster_evaluator
+        self.evaluator = evaluator
         self.hold_period = hold_period
         self.verbose = verbose
 
-        # Setup logging
         if self.verbose:
             logging.basicConfig(level=logging.INFO)
 
@@ -78,17 +76,29 @@ class ModelTester:
         self,
         data: np.ndarray,
         price_data: Optional[np.ndarray] = None,
-        returns_series: Optional[pd.Series] = None,  # New parameter
+        returns_series: Optional[pd.Series] = None,
         plot_equity: bool = False,
     ) -> Tuple[float, Dict[str, float]]:
         """
-        Test the model on new data and compute performance metrics.
+        Test the model using the updated evaluator interface.
+
+        This method handles both HoldingPeriod and VectorPattern evaluation approaches.
+        It processes the data, generates predictions, and evaluates performance using
+        the appropriate evaluation strategy.
 
         Args:
-            data (np.ndarray): Input data for testing
-            price_data (np.ndarray, optional): Price data for returns computation
-            returns_series (pd.Series, optional): Pre-calculated returns with datetime index
-            plot_equity (bool): Whether to plot the equity curve
+            data: Input data for testing
+            price_data: Optional price data for returns computation
+            returns_series: Optional pre-calculated returns with datetime index
+            plot_equity: Whether to plot the equity curve
+
+        Returns:
+            Tuple[float, Dict[str, float]]:
+                - Martin ratio performance metric
+                - Dictionary of all performance metrics
+
+        Raises:
+            ValueError: If data validation fails or inputs are inconsistent
         """
         if price_data is None:
             price_data = np.copy(data)
@@ -121,28 +131,26 @@ class ModelTester:
         windows = self.preprocessor.generate_training_set(
             processed_data, self.mining_core.n_lookback, test_mode=True
         )
-        pivots, unique_indices = self.preprocessor.transform_data(
+
+        transformed_data, unique_indices = self.preprocessor.transform_data(
             windows, self.mining_core.n_pivots, self.mining_core.reducer, test_mode=True
         )
 
-        # Generate cluster labels and signals
-        cluster_labels = self.mining_core.predict(pivots)
+        # Generate cluster labels
+        cluster_labels = self.mining_core.predict(transformed_data)
 
-        indices = unique_indices + self.mining_core.n_lookback - 1
-        labels = self._assign_labels(processed_data, cluster_labels, indices)
-        signals = self._generate_signals(labels, returns)
-
-        # Calculate performance metrics
-        strategy_returns = signals * returns
-        if returns_index is not None:
-            strategy_returns = pd.Series(strategy_returns, index=returns_index)
-
-        metrics = self._calculate_metrics(strategy_returns)
+        # Evaluate using the appropriate evaluator
+        metrics = self.evaluator.evaluate_all_clusters(
+            data=transformed_data,
+            labels=cluster_labels,
+            returns=pd.Series(returns, index=returns_index),
+        )
 
         if plot_equity:
+            strategy_returns = pd.Series(returns, index=returns_index)
             self._plot_equity_curve(strategy_returns)
 
-        return metrics["martin_ratio"], metrics
+        return metrics.get("martin_ratio", 0.0), metrics
 
     def cross_validate(
         self,
@@ -154,9 +162,9 @@ class ModelTester:
         Perform time series cross-validation.
 
         Args:
-            data (np.ndarray): Input data
-            price_data (np.ndarray, optional): Price data
-            n_splits (int): Number of cross-validation splits
+            data: Input data
+            price_data: Optional price data
+            n_splits: Number of cross-validation splits
 
         Returns:
             Dict[str, List[float]]: Dictionary of performance metrics for each fold
@@ -180,22 +188,22 @@ class ModelTester:
             test_price = price_data[test_idx]
 
             # Reset MVR state for each fold if using MVR
-            if isinstance(self.core.reducer, ReducerMVR):
-                self.core.reducer.movement_history.clear()
-                self.core.reducer.stats = MovementStats()
-                self.core.reducer._last_movement = np.zeros(
-                    self.core.reducer.FEATURES_PER_PIVOT
+            if isinstance(self.mining_core.reducer, ReducerMVR):
+                self.mining_core.reducer.movement_history.clear()
+                self.mining_core.reducer.stats = MovementStats()
+                self.mining_core.reducer._last_movement = np.zeros(
+                    self.mining_core.reducer.FEATURES_PER_PIVOT
                 )
 
             # Train model
             self._train_model(train_data)
 
             # Test model
-            martin_ratio, metrics = self.test_model(test_data, test_price)
+            martin_ratio, fold_metrics = self.test_model(test_data, test_price)
 
             # Store metrics
             for key in cv_metrics:
-                cv_metrics[key].append(metrics[key])
+                cv_metrics[key].append(fold_metrics[key])
 
         if self.verbose:
             self._log_cv_results(cv_metrics)
@@ -255,74 +263,8 @@ class ModelTester:
         )
         self.mining_core.fit(transformed_data)
 
-    def _assign_labels(
-        self, data: np.ndarray, labels: np.ndarray, indices: np.ndarray
-    ) -> np.ndarray:
-        """
-        Assign cluster labels to full dataset.
-
-        Args:
-            data (np.ndarray): Full dataset
-            labels (np.ndarray): Cluster labels
-            indices (np.ndarray): Indices for label assignment
-
-        Returns:
-            np.ndarray: Array of assigned labels
-        """
-        full_labels = np.ones(len(data)) * -1
-        full_labels[indices] = labels
-        return full_labels
-
-    def _generate_signals(self, labels: np.ndarray, returns: np.ndarray) -> np.ndarray:
-        """
-        Generate trading signals from labels.
-
-        Args:
-            labels (np.ndarray): Cluster labels
-            returns (np.ndarray): Returns data
-
-        Returns:
-            np.ndarray: Trading signals
-        """
-        # Create signal masks
-        mask_long = np.isin(labels, self.cluster_evaluator.cluster_labels_long)
-        mask_short = np.isin(labels, self.cluster_evaluator.cluster_labels_short)
-
-        # Generate signals
-        signals = np.zeros_like(returns)
-        signals[mask_long] = 1
-        signals[mask_short] = -1
-
-        # Apply holding period
-        return self.cluster_evaluator._apply_holding_period(signals)
-
-    def _calculate_metrics(self, returns: np.ndarray) -> Dict[str, float]:
-        """
-        Calculate key performance metrics.
-
-        Args:
-            returns (np.ndarray): Strategy returns
-
-        Returns:
-            Dict[str, float]: Dictionary of performance metrics
-        """
-        series_returns = pd.Series(returns)
-
-        return {
-            "martin_ratio": float(qt.stats.ulcer_performance_index(series_returns)),
-            "sharpe_ratio": float(qt.stats.sharpe(series_returns)),
-            "profit_factor": float(qt.stats.profit_factor(series_returns)),
-            "avg_return": float(qt.stats.avg_return(series_returns)),
-            "max_drawdown": float(qt.stats.max_drawdown(series_returns)),
-        }
-
-    def _plot_equity_curve(self, returns: np.ndarray):
-        """
-        Plot cumulative returns curve.
-
-        Args:
-            returns (np.ndarray): Strategy returns
-        """
+    def _plot_equity_curve(self, returns: pd.Series) -> None:
+        """Plot cumulative returns curve."""
         plt.figure(figsize=(12, 6))
         plt.plot(np.cumsum(returns))
         plt.title("Equity Curve")
@@ -669,393 +611,6 @@ class MiningCore:
     def labels_(self) -> np.ndarray:
         """Get cluster labels."""
         return self.cluster_model.labels_
-
-
-class ClusterEvaluator:
-    """
-    Handles cluster performance assessment and model evaluation.
-
-    This class centralizes all cluster evaluation operations, including performance metrics
-    calculation, cluster assessment, and optimal cluster number determination.
-
-    Attributes:
-        selection_mode (str): Mode for selecting clusters ('best' or 'baseline')
-        verbose (bool): Controls logging verbosity
-        hold_period (int): Number of periods to hold positions
-        cluster_labels_long (List[int]): Selected cluster labels for long positions
-        cluster_labels_short (List[int]): Selected cluster labels for short positions
-    """
-
-    def __init__(
-        self, selection_mode: str = "best", hold_period: int = 6, verbose: bool = False
-    ):
-        """
-        Initialize the ClusterEvaluator.
-
-        Args:
-            selection_mode (str): Strategy for selecting clusters ('best' or 'baseline')
-            hold_period (int): Number of periods to hold positions
-            verbose (bool): Enable detailed logging output
-        """
-        self.selection_mode = selection_mode
-        self.verbose = verbose
-        self.hold_period = hold_period
-
-        # Initialize cluster label storage
-        self.cluster_labels_long: List[int] = []
-        self.cluster_labels_short: List[int] = []
-
-        # Setup logging
-        if self.verbose:
-            logging.basicConfig(level=logging.INFO)
-
-    def assess_clusters(
-        self, labels: np.ndarray, returns: Union[np.ndarray, pd.Series], n_clusters: int
-    ) -> Tuple[List[int], List[int]]:
-        """
-        Assess each cluster's performance and select the best performing clusters.
-
-        Args:
-            labels (np.ndarray): Cluster labels for each data point
-            returns (Union[np.ndarray, pd.Series]): Returns data
-            n_clusters (int): Total number of clusters
-        """
-        self.cluster_labels_long.clear()
-        self.cluster_labels_short.clear()
-
-        # Convert numpy array to pandas Series if needed
-        if isinstance(returns, np.ndarray):
-            returns = pd.Series(
-                returns,
-                index=pd.date_range(start="2000-01-01", periods=len(returns), freq="D"),
-            )
-
-        # Adjust lengths to match
-        min_length = min(len(labels), len(returns))
-        labels = labels[:min_length]
-        returns = returns[:min_length]
-
-        # Store cluster scores
-        cluster_scores = []
-        baseline_long = []
-        baseline_short = []
-
-        # Calculate baseline metrics with adjusted lengths
-        baseline_metrics = self._compute_baseline_metrics(returns)
-
-        # Evaluate each cluster
-        for label in range(n_clusters):
-            score, long_metrics, short_metrics = self._evaluate_single_cluster(
-                label, labels, returns
-            )
-
-            cluster_scores.append(score)
-
-            # Handle baseline selection mode
-            if self.selection_mode == "baseline":
-                self._assess_baseline_performance(
-                    label,
-                    long_metrics,
-                    short_metrics,
-                    baseline_metrics,
-                    baseline_long,
-                    baseline_short,
-                )
-
-        # Select best performing clusters
-        if self.selection_mode == "baseline":
-            self.cluster_labels_long = baseline_long
-            self.cluster_labels_short = baseline_short
-        else:
-            self._select_best_clusters(cluster_scores)
-
-        if self.verbose:
-            logging.info(f"Selected long clusters: {self.cluster_labels_long}")
-            logging.info(f"Selected short clusters: {self.cluster_labels_short}")
-
-        return self.cluster_labels_long, self.cluster_labels_short
-
-    def compute_performance(
-        self, labels: np.ndarray, returns: Union[np.ndarray, pd.Series]
-    ) -> float:
-        """
-        Compute overall performance metrics for selected clusters.
-
-        Args:
-            labels (np.ndarray): Cluster labels for each data point
-            returns (Union[np.ndarray, pd.Series]): Returns data
-        """
-        # Adjust lengths to match
-        min_length = min(len(labels), len(returns))
-        labels = labels[:min_length]
-
-        if isinstance(returns, pd.Series):
-            returns = returns[:min_length]
-        else:
-            returns = returns[:min_length]
-
-        # Generate signals from cluster labels
-        signals = self._generate_signals(labels)
-
-        # Apply holding period
-        signals = self._apply_holding_period(signals)
-
-        # Calculate returns
-        if isinstance(returns, pd.Series):
-            strategy_returns = pd.Series(signals * returns.values, index=returns.index)
-        else:
-            strategy_returns = signals * returns
-
-        return self.compute_martin(strategy_returns)
-
-    def compute_martin(self, returns: Union[np.ndarray, pd.Series]) -> float:
-        """Modified to ensure returns has datetime index"""
-        if isinstance(returns, np.ndarray):
-            returns = pd.Series(returns)
-        if not isinstance(returns.index, pd.DatetimeIndex):
-            returns.index = pd.date_range(
-                start="2000-01-01", periods=len(returns), freq="D"
-            )
-
-        return qt.stats.ulcer_performance_index(returns)
-
-    def find_optimal_clusters(
-        self, data: np.ndarray, min_clusters: int = 2, max_clusters: int = 50
-    ) -> int:
-        """
-        Find optimal number of clusters using silhouette score.
-
-        Args:
-            data (np.ndarray): Input data for clustering
-            min_clusters (int): Minimum number of clusters to try
-            max_clusters (int): Maximum number of clusters to try
-
-        Returns:
-            int: Optimal number of clusters
-        """
-        n_clusters_range = range(min_clusters, max_clusters)
-        silhouette_scores = []
-
-        for n in n_clusters_range:
-            score = self._compute_clustering_score(data, n)
-            silhouette_scores.append(score)
-
-        # Find the elbow point
-        kneedle = KneeLocator(
-            n_clusters_range,
-            np.array(silhouette_scores),
-            S=1.0,
-            curve="convex",
-            direction="decreasing",
-        )
-
-        optimal_n = kneedle.knee
-
-        if self.verbose:
-            logging.info(f"Optimal number of clusters: {optimal_n}")
-
-        return optimal_n
-
-    def _compute_baseline_metrics(self, returns: pd.Series) -> Dict[str, float]:
-        """
-        Compute baseline performance metrics for comparison.
-
-        Args:
-            returns (pd.Series): Returns data
-
-        Returns:
-            Dict[str, float]: Dictionary of baseline metrics
-        """
-        return {
-            "profit_factor": max(qt.stats.profit_factor(returns), 0),
-            "sharpe_ratio": max(qt.stats.sharpe(returns), 0),
-            "upi": max(qt.stats.ulcer_performance_index(returns), 1),
-            "max_dd": qt.stats.max_drawdown(returns),
-        }
-
-    def _evaluate_single_cluster(
-        self, label: int, labels: np.ndarray, returns: Union[np.ndarray, pd.Series]
-    ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
-        """
-        Evaluate performance metrics for a single cluster.
-
-        Args:
-            label (int): Cluster label to evaluate
-            labels (np.ndarray): All cluster labels
-            returns (Union[np.ndarray, pd.Series]): Returns data
-
-        Returns:
-            Tuple[float, Dict[str, float], Dict[str, float]]:
-                Martin score, long metrics, and short metrics
-        """
-        # Create mask for the label
-        mask_label = labels == label
-
-        # Generate signals
-        signals = mask_label.astype(int)
-        signals = self._apply_holding_period(signals)
-
-        # Handle returns data
-        if isinstance(returns, pd.Series):
-            returns_index = returns.index
-            returns_values = returns.values
-        else:
-            returns_values = returns
-            returns_index = pd.date_range(
-                start="2000-01-01", periods=len(returns), freq="D"
-            )
-
-        # Adjust lengths to match
-        min_length = min(len(signals), len(returns_values))
-        signals = signals[:min_length]
-        returns_values = returns_values[:min_length]
-        returns_index = returns_index[:min_length]
-
-        # Calculate cluster returns with adjusted lengths
-        cluster_returns = pd.Series(signals * returns_values, index=returns_index)
-        martin_score = self.compute_martin(cluster_returns)
-
-        # Calculate metrics for both directions using the length-adjusted data
-        long_metrics = self._calculate_direction_metrics(
-            pd.Series(returns_values, index=returns_index), 1
-        )
-        short_metrics = self._calculate_direction_metrics(
-            pd.Series(returns_values, index=returns_index), -1
-        )
-
-        return (
-            0 if np.isinf(martin_score) or np.isnan(martin_score) else martin_score,
-            long_metrics,
-            short_metrics,
-        )
-
-    def _calculate_direction_metrics(
-        self, returns: np.ndarray, direction: int
-    ) -> Dict[str, float]:
-        """
-        Calculate performance metrics for a specific trading direction.
-
-        Args:
-            returns (np.ndarray): Returns data
-            direction (int): Trading direction (1 for long, -1 for short)
-
-        Returns:
-            Dict[str, float]: Dictionary of performance metrics
-        """
-        ret = pd.Series(returns * direction)
-        return {
-            "profit_factor": qt.stats.profit_factor(ret),
-            "sharpe": qt.stats.rolling_sharpe(ret).mean(),
-            "upi": qt.stats.ulcer_performance_index(ret),
-            "max_dd": qt.stats.to_drawdown_series(ret).mean(),
-        }
-
-    def _assess_baseline_performance(
-        self,
-        label: int,
-        long_metrics: Dict[str, float],
-        short_metrics: Dict[str, float],
-        baseline_metrics: Dict[str, float],
-        baseline_long: List[int],
-        baseline_short: List[int],
-    ):
-        """
-        Assess cluster performance against baseline metrics.
-
-        Args:
-            label (int): Cluster label
-            long_metrics (Dict[str, float]): Long position metrics
-            short_metrics (Dict[str, float]): Short position metrics
-            baseline_metrics (Dict[str, float]): Baseline metrics
-            baseline_long (List[int]): List to store long cluster labels
-            baseline_short (List[int]): List to store short cluster labels
-        """
-        for metrics, direction_list in [
-            (long_metrics, baseline_long),
-            (short_metrics, baseline_short),
-        ]:
-            if (
-                not np.isinf(metrics["upi"])
-                and not np.isnan(metrics["upi"])
-                and metrics["profit_factor"] > baseline_metrics["profit_factor"]
-                and metrics["sharpe"] > baseline_metrics["sharpe_ratio"]
-                and metrics["upi"] > baseline_metrics["upi"]
-                and metrics["max_dd"] > baseline_metrics["max_dd"]
-            ):
-                direction_list.append(label)
-
-    def _select_best_clusters(self, scores: List[float]):
-        """
-        Select best performing clusters based on scores.
-
-        Args:
-            scores (List[float]): List of cluster performance scores
-        """
-        self.cluster_labels_long.append(np.argmax(scores))
-        self.cluster_labels_short.append(np.argmin(scores))
-
-    def _generate_signals(self, labels: np.ndarray) -> np.ndarray:
-        """
-        Generate trading signals from cluster labels.
-
-        Args:
-            labels (np.ndarray): Cluster labels
-
-        Returns:
-            np.ndarray: Generated trading signals
-        """
-        signals = np.zeros_like(labels, dtype=float)
-        signals[np.isin(labels, self.cluster_labels_long)] = 1
-        signals[np.isin(labels, self.cluster_labels_short)] = -1
-        return signals
-
-    def _apply_holding_period(self, signals: np.ndarray) -> np.ndarray:
-        """
-        Apply holding period to trading signals.
-
-        Args:
-            signals (np.ndarray): Trading signals
-
-        Returns:
-            np.ndarray: Signals with holding period applied
-        """
-        new_signals = np.zeros_like(signals)
-        nonzero = np.where(signals != 0)[0]
-        prev_index = -self.hold_period - 1
-
-        for index in nonzero:
-            signal = signals[index]
-            if index > prev_index + self.hold_period:
-                prev_index = index
-                start_index = index + 1
-                end_index = min(index + self.hold_period + 1, len(signals))
-                new_signals[start_index:end_index] = signal
-
-        return new_signals
-
-    def _compute_clustering_score(self, data: np.ndarray, n_clusters: int) -> float:
-        """
-        Compute clustering score using multiple clustering algorithms.
-
-        Args:
-            data (np.ndarray): Input data
-            n_clusters (int): Number of clusters to evaluate
-
-        Returns:
-            float: Average silhouette score
-        """
-        birch = Birch(n_clusters=n_clusters)
-        kmeans = KMeans(n_clusters=n_clusters, n_init="auto")
-
-        birch.fit(data)
-        kmeans.fit(data)
-
-        return np.mean(
-            [
-                silhouette_score(data, birch.labels_),
-                silhouette_score(data, kmeans.labels_),
-            ]
-        )
 
 
 class DataPreprocessor:
@@ -1495,9 +1050,18 @@ class Visualizer:
     ) -> None:
         """
         Visualize performance metrics for each cluster.
+
+        Args:
+            cluster_metrics: Dictionary of metrics for each cluster
+            title: Plot title
+            metrics: Optional list of specific metrics to plot (will use available metrics if None)
+            save: Whether to save the plot
         """
+        # Determine available metrics from the data if none specified
         if metrics is None:
-            metrics = ["martin_ratio", "sharpe_ratio", "profit_factor"]
+            # Use the metrics available in the first cluster's data
+            first_cluster = next(iter(cluster_metrics.values()))
+            metrics = list(first_cluster.keys())
 
         n_metrics = len(metrics)
         fig, axes = plt.subplots(n_metrics, 1, figsize=(12, 4 * n_metrics))
@@ -1509,7 +1073,9 @@ class Visualizer:
         for i, metric in enumerate(metrics):
             # Extract values and ensure cluster indices are numeric
             clusters = np.array(list(cluster_metrics.keys()), dtype=int)
-            values = [cluster_metrics[k][metric] for k in clusters]
+            values = [
+                cluster_metrics[k].get(metric, 0.0) for k in clusters
+            ]  # Use get() with default
 
             ax = axes[i]
             sns.barplot(x=clusters, y=values, ax=ax)  # Use numeric clusters directly
@@ -1742,19 +1308,29 @@ class Visualizer:
         active_returns = returns - benchmark_returns
         return np.mean(active_returns) / np.std(active_returns) * np.sqrt(252)
 
-    def _add_metrics_annotations(
-        self, fig: go.Figure, metrics: Dict[str, float]
-    ) -> None:
+    def _add_metrics_annotations(self, fig: go.Figure, metrics: Dict[str, Any]) -> None:
         """
         Add metrics annotations to plotly figure.
 
         Args:
             fig (go.Figure): Plotly figure
-            metrics (Dict[str, float]): Performance metrics
+            metrics (Dict[str, Any]): Performance metrics
         """
-        annotation_text = "<br>".join(
-            [f"{key}: {value:.4f}" for key, value in metrics.items()]
-        )
+        # Format metric values based on their type
+        formatted_metrics = []
+        for key, value in metrics.items():
+            if hasattr(value, "mean_score"):
+                # Handle ClusterStats objects
+                formatted_metrics.append(f"{key} mean: {value.mean_score:.4f}")
+                formatted_metrics.append(f"{key} std: {value.score_std:.4f}")
+            elif isinstance(value, (int, float)):
+                # Handle numeric values
+                formatted_metrics.append(f"{key}: {value:.4f}")
+            else:
+                # Handle other types by converting to string
+                formatted_metrics.append(f"{key}: {value!s}")
+
+        annotation_text = "<br>".join(formatted_metrics)
 
         fig.add_annotation(
             xref="paper",
@@ -2118,13 +1694,23 @@ class ModelManager:
 
     def _extract_model_state(self, model: Any) -> Dict[str, Any]:
         """
-        Extract state from model components.
+        Extract complete model state including evaluator components.
+
+        This method captures all necessary state information for model persistence,
+        including the new evaluator state. It ensures proper serialization of model
+        components while maintaining backward compatibility.
 
         Args:
-            model: Model instance
+            model: Model instance to extract state from
 
         Returns:
-            Dict[str, Any]: Extracted model state
+            Dict[str, Any]: Complete model state dictionary containing:
+                - model_params: Core model parameters
+                - preprocessing_params: Data preprocessing parameters
+                - cluster_labels: Selected cluster labels
+                - model_components: Core model components
+                - evaluator_state: Complete evaluator state
+                - training_data: Training data and labels
         """
         state = {
             "model_params": {
@@ -2135,21 +1721,25 @@ class ModelManager:
                 "model_type": getattr(model, "model_type", None),
                 "reducer_type": getattr(model, "reducer_type", None),
                 "wavelet": getattr(model, "wavelet", None),
-                "cluster_selection_mode": getattr(
-                    model, "cluster_selection_mode", None
-                ),
             },
             "preprocessing_params": {
                 "data_min": getattr(model, "_data_min", None),
                 "data_max": getattr(model, "_data_max", None),
             },
             "cluster_labels": {
-                "long": getattr(model, "_cluster_labels_long", []),
-                "short": getattr(model, "_cluster_labels_short", []),
+                "long": getattr(model.evaluator, "selected_long", []),
+                "short": getattr(model.evaluator, "selected_short", []),
             },
             "model_components": {
                 "reducer": getattr(model, "reducer", None),
                 "cluster_model": getattr(model, "cluster_model", None),
+            },
+            "evaluator_state": {
+                "type": type(model.evaluator).__name__,
+                "params": model.evaluator.__dict__,
+                "cluster_stats": model.evaluator.cluster_stats,
+                "selected_long": model.evaluator.selected_long,
+                "selected_short": model.evaluator.selected_short,
             },
             "training_data": {
                 "original": getattr(model, "_training_data", None),
@@ -2164,17 +1754,21 @@ class ModelManager:
         """
         Validate model state format and required components.
 
+        Ensures all necessary components are present in the state dictionary and
+        have valid formats. Includes validation for new evaluator components.
+
         Args:
-            state (Dict[str, Any]): State to validate
+            state: State dictionary to validate
 
         Raises:
-            ValueError: If state format is invalid
+            ValueError: If state format is invalid or missing required components
         """
         required_keys = [
             "model_params",
             "preprocessing_params",
             "cluster_labels",
             "model_components",
+            "evaluator_state",
         ]
 
         if not all(k in state for k in required_keys):
@@ -2193,6 +1787,24 @@ class ModelManager:
         if not all(k in state["cluster_labels"] for k in ["long", "short"]):
             raise ValueError("Invalid cluster_labels format")
 
-        # Validate model components
-        if not isinstance(state["model_components"], dict):
-            raise ValueError("Invalid model_components format")
+        # Add evaluator type validation
+        if "evaluator_state" in state:
+            if state["evaluator_state"]["type"] not in [
+                "HoldingPeriodEvaluator",
+                "VectorPatternEvaluator",
+            ]:
+                raise ValueError("Invalid evaluator type")
+
+        # Validate evaluator state
+        required_evaluator_keys = [
+            "type",
+            "params",
+            "cluster_stats",
+            "selected_long",
+            "selected_short",
+        ]
+        if not all(k in state["evaluator_state"] for k in required_evaluator_keys):
+            missing = [
+                k for k in required_evaluator_keys if k not in state["evaluator_state"]
+            ]
+            raise ValueError(f"Missing required evaluator state components: {missing}")

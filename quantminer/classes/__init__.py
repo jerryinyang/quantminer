@@ -1,3 +1,4 @@
+from . import evaluators
 from .mvr import MovementStats, ReducerMVR
 from .reducers import (
     BaseReducer,
@@ -19,4 +20,5 @@ __all__ = [
     "ReducerPIP",
     "ReducerWavelet",
     "SeqKMeans",
+    "evaluators",
 ]
