@@ -417,7 +417,7 @@ class Miner:
                 "selected_short": self.evaluator.selected_short,
             }
 
-            # Update model state with evaluator
+            # Create model state
             model_state = {
                 "config": self.config,
                 "evaluator_state": evaluator_state,
@@ -459,7 +459,8 @@ class Miner:
         """
         try:
             # Load model state
-            model_state = ModelManager().load_model(path)
+            model_manager = ModelManager()
+            model_state = model_manager.load_model(path)
 
             # Create new instance with saved config
             instance = cls(model_state["config"])

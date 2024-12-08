@@ -1549,13 +1549,13 @@ class ModelManager:
         if self.verbose:
             logging.basicConfig(level=logging.INFO)
 
-    def save_model(self, model: Any, path: Path) -> None:
+    def save_model(self, model_state: Dict[str, Any], path: Path) -> None:
         """
         Save the model state to a file.
 
         Args:
-            model: Model instance to save
-            path (Path): Path to save the model
+            model_state: Dictionary containing model state
+            path: Path to save the model
 
         Raises:
             ValueError: If path is invalid
@@ -1569,12 +1569,9 @@ class ModelManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Get current model state
-            self.model_state = self._extract_model_state(model)
-
-            # Save model state
+            # Store state
             with open(path, "wb") as f:
-                pickle.dump(self.model_state, f)
+                pickle.dump(model_state, f)
 
             if self.verbose:
                 logging.info(f"Model saved successfully to {path}")
@@ -1588,7 +1585,7 @@ class ModelManager:
         Load a model state from a file.
 
         Args:
-            path (Path): Path to load the model from
+            path: Path to load the model from
 
         Returns:
             Dict[str, Any]: Loaded model state

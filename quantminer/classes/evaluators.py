@@ -707,43 +707,14 @@ class VectorPatternEvaluator(BaseClusterEvaluator):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Extract current and future vectors for cluster patterns using PIP transformation.
-
-        This method carefully handles the extraction of movement vectors while ensuring:
-        1. Proper window boundaries with no out-of-bounds access
-        2. No overlap between current and future windows
-        3. Correct temporal alignment of sequences
-        4. Validation of sequence consistency and completeness
-
-        The extraction process:
-        1. Identifies cluster pattern locations
-        2. For each location:
-        - Extracts non-overlapping current and future windows
-        - Applies PIP transformation to each window
-        - Calculates movement features
-        - Validates sequence completeness
-        3. Ensures all sequences maintain temporal order and alignment
-
-        Args:
-            data: Full price dataset of shape (n_samples,)
-            cluster_mask: Boolean mask for cluster members of shape (n_samples,)
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]:
-                - Current vectors of shape (n_valid_sequences, n_future_vectors, n_features)
-                - Future vectors of shape (n_valid_sequences, n_future_vectors, n_features)
-
-        Raises:
-            ValueError: If no valid sequences found or sequence validation fails
         """
         cluster_indices = np.where(cluster_mask)[0]
         sequences = []
         future_sequences = []
 
         # Calculate required window sizes
-        window_size = self.n_future_vectors * 2  # Minimum points needed for n vectors
-        total_required_size = (
-            window_size * 2
-        )  # Space for both current and future windows
+        window_size = self.n_future_vectors * 2
+        total_required_size = window_size * 2
 
         # Validate data length
         if len(data) < total_required_size:
@@ -764,21 +735,15 @@ class VectorPatternEvaluator(BaseClusterEvaluator):
                 continue
 
             # Extract non-overlapping windows
-            current_start = idx
-            current_end = idx + window_size
-            future_start = current_end
-            future_end = future_start + window_size
-
-            # Validate window separation
-            assert current_end == future_start, "Window overlap detected"
-
-            # Extract windows
-            current_window = data[current_start:current_end]
-            future_window = data[future_start:future_end]
+            current_window = data[idx : idx + window_size]
+            future_window = data[idx + window_size : idx + total_required_size]
 
             # Verify window contents
-            if np.any(np.isnan(current_window)) or np.any(np.isnan(future_window)):
+            if np.isnan(current_window).any() or np.isnan(future_window).any():
                 self.logger.warning(f"NaN values detected in windows at index {idx}")
+                continue
+
+            if not self._validate_sequence_data(current_window, future_window, idx):
                 continue
 
             try:
@@ -836,15 +801,18 @@ class VectorPatternEvaluator(BaseClusterEvaluator):
                     sequence_metadata.append(
                         {
                             "index": idx,
-                            "current_range": (current_start, current_end),
-                            "future_range": (future_start, future_end),
+                            "current_range": (idx, idx + window_size),
+                            "future_range": (
+                                idx + window_size,
+                                idx + total_required_size,
+                            ),
                             "price_range_current": (
-                                np.min(current_window),
-                                np.max(current_window),
+                                float(np.min(current_window)),
+                                float(np.max(current_window)),
                             ),
                             "price_range_future": (
-                                np.min(future_window),
-                                np.max(future_window),
+                                float(np.min(future_window)),
+                                float(np.max(future_window)),
                             ),
                         }
                     )
@@ -915,6 +883,40 @@ class VectorPatternEvaluator(BaseClusterEvaluator):
         self.logger.info(
             f"Validated {len(metadata)} sequences with consistent alignment"
         )
+
+    def _validate_sequence_data(
+        self, current_window: np.ndarray, future_window: np.ndarray, idx: int
+    ) -> bool:
+        """
+        Validate sequence windows before processing.
+
+        Returns:
+            bool: True if sequence is valid, False otherwise
+        """
+        # Check for NaN values
+        if np.isnan(current_window).any() or np.isnan(future_window).any():
+            self.logger.debug(f"NaN values detected in windows at index {idx}")
+            return False
+
+        # Check for minimum movement
+        current_range = np.ptp(current_window)
+        future_range = np.ptp(future_window)
+        min_movement = np.mean([current_range, future_range]) * self.min_movement
+
+        if current_range < min_movement or future_range < min_movement:
+            self.logger.debug(f"Insufficient price movement at index {idx}")
+            return False
+
+        # Check for excessive volatility
+        current_volatility = np.std(np.diff(current_window))
+        future_volatility = np.std(np.diff(future_window))
+        max_volatility = np.mean([current_range, future_range]) * 0.1
+
+        if current_volatility > max_volatility or future_volatility > max_volatility:
+            self.logger.debug(f"Excessive volatility at index {idx}")
+            return False
+
+        return True
 
     def _calculate_pattern_scores(
         self, current_vectors: np.ndarray, future_vectors: np.ndarray

@@ -269,10 +269,25 @@ def run_mining_test(ohlc_data: pd.DataFrame, config: dict):
             test_data, returns_series=test_returns, plot_results=True
         )
 
-        # Print test metrics
+        # Print test metrics with proper formatting
         print("\nTest Performance Metrics:")
         for metric, value in test_metrics.items():
-            print(f"{metric}: {value:.4f}")
+            if hasattr(value, "mean_score"):
+                # Handle ClusterStats objects
+                print(f"{metric}:")
+                print(f"  Mean Score: {value.mean_score:.4f}")
+                print(f"  Score Std: {value.score_std:.4f}")
+                print(f"  Sample Size: {value.sample_size}")
+                if hasattr(value, "confidence_interval"):
+                    print(
+                        f"  Confidence Interval: ({value.confidence_interval[0]:.4f}, {value.confidence_interval[1]:.4f})"
+                    )
+            elif isinstance(value, (int, float)):
+                # Handle numeric values
+                print(f"{metric}: {value:.4f}")
+            else:
+                # Handle other types
+                print(f"{metric}: {value}")
 
         # Save the model
         miner.save(Path("trained_model.pkl"))
